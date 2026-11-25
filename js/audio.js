@@ -313,5 +313,19 @@ export async function buildMix(duration) {
     src.start(Math.max(0, item.t), 0, Math.min(buf.duration, Math.max(0.05, dur - item.t)));
   }
 
+  // 5) 구간 음성 (TTS · 녹음 · 외부 파일)
+  for (const item of p.audio.voice || []) {
+    const start = Math.max(0, item.start || 0);
+    if (start >= dur) continue;
+    const buf = await decodeAudio(item.assetId);
+    if (!buf) continue;
+    const src = oc.createBufferSource();
+    src.buffer = buf;
+    const g = oc.createGain();
+    g.gain.value = Math.max(0, (item.volume ?? 100) / 100);
+    src.connect(g); g.connect(master);
+    src.start(start, 0, Math.min(buf.duration, Math.max(0.05, dur - start)));
+  }
+
   return oc.startRendering();
 }

@@ -37,7 +37,7 @@ function drawPlaceholder(ctx, text) {
   ctx.fillStyle = '#161b22';
   ctx.fillRect(0, 0, DESIGN_W, DESIGN_H);
   ctx.fillStyle = '#5d6675';
-  ctx.font = '600 40px "Noto Sans KR", sans-serif';
+  ctx.font = '600 40px "Noto Sans KR", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text || '미디어를 불러오는 중…', DESIGN_W / 2, DESIGN_H / 2);
@@ -90,7 +90,7 @@ function drawTextBlock(ctx, st, text, x, y) {
   const lines = String(text).split('\n').filter((l, i, a) => !(a.length > 1 && l === '' && i === a.length - 1));
   if (!lines.length || !lines.some((l) => l.trim())) return null;
   const weight = st.weight || 800;
-  ctx.font = `${weight} ${st.size}px "${st.font}", "Noto Sans KR", sans-serif`;
+  ctx.font = `${weight} ${st.size}px "${st.font}", "Noto Sans KR", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 

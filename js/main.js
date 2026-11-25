@@ -7,9 +7,11 @@ import { initClipsPanel, addMediaFiles, refreshClips, setSelectedClip } from './
 import { initTextPanel, refreshTextPanel, syncPositionInputs, renderStyleCard } from './panels/text.js';
 import { initAudioPanel, refreshAudioPanel, selectSfx } from './panels/audio.js';
 import { initExportPanel, refreshExportPanel } from './panels/export.js';
+import { initAiPanel, refreshAiPanel } from './panels/ai.js';
 import { initTimeline, renderTimeline, setPlayhead } from './timeline.js';
 import { initPlayer, togglePlay, play, pause, seek, requestRender, resizeCanvas, setMuted } from './player.js';
 import { hitTestText } from './render.js';
+import { buildMix } from './audio.js';
 
 let activeTab = 'clips';
 
@@ -24,6 +26,7 @@ async function boot() {
   initTextPanel($('[data-pane="text"]'));
   initAudioPanel($('[data-pane="audio"]'));
   initExportPanel($('[data-pane="export"]'));
+  initAiPanel($('[data-pane="ai"]'));
   initTimeline();
   initPlayer();
 
@@ -44,7 +47,7 @@ async function boot() {
   $('#emptyPick').addEventListener('click', () => $('#globalFilePicker').click());
 
   // 디버깅용 (읽기 전용 참고): 콘솔에서 현재 상태 확인
-  window.__reels = { state, totalDuration, render: () => requestRender(), seek };
+  window.__reels = { state, totalDuration, render: () => requestRender(), seek, mix: () => buildMix(totalDuration()) };
 
   refreshAll();
   // 폰트 로딩 후 한 번 더 그려 폴백 글꼴로 굳는 것을 방지
@@ -61,6 +64,7 @@ function refreshAll() {
   refreshTextPanel();
   refreshAudioPanel();
   refreshExportPanel();
+  refreshAiPanel();
   renderTimeline();
   updateChrome();
   requestRender();
@@ -91,6 +95,7 @@ function bindTabs() {
       $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
       $$('.pane').forEach((p) => p.classList.toggle('active', p.dataset.pane === activeTab));
       if (activeTab === 'export') refreshExportPanel();
+      if (activeTab === 'ai') refreshAiPanel();
       if (activeTab === 'text') { renderStyleCardSafe(); }
     });
   });
@@ -165,6 +170,7 @@ function wireEvents() {
     if (panels.includes('text')) refreshTextPanel();
     if (panels.includes('audio')) refreshAudioPanel();
     if (panels.includes('export')) refreshExportPanel();
+    if (panels.includes('ai')) refreshAiPanel();
     renderTimeline();
     updateChrome();
     requestRender();

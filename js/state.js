@@ -45,7 +45,7 @@ export function defaultProject() {
     segments: [
       { id: uid('seg'), start: 0, end: 4, title: '', badge: '', subtitle: '', pos: {} },
     ],
-    audio: { narration: null, bgm: null, sfx: [], customSfx: [] },
+    audio: { narration: null, bgm: null, sfx: [], customSfx: [], voice: [] },
     export: { width: 1080, height: 1920, fps: 30, realtime: false, bitrateMbps: 8 },
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -188,7 +188,7 @@ export async function loadProject() {
         badge: { ...d.texts.badge, ...(p.texts && p.texts.badge) },
         subtitle: { ...d.texts.subtitle, ...(p.texts && p.texts.subtitle) },
       },
-      audio: { narration: null, bgm: null, sfx: [], customSfx: [], ...(p.audio || {}) },
+      audio: { narration: null, bgm: null, sfx: [], customSfx: [], voice: [], ...(p.audio || {}) },
       export: { ...d.export, ...(p.export || {}) },
       segments: Array.isArray(p.segments) && p.segments.length ? p.segments : d.segments,
     };

@@ -3,3 +3,4 @@ testdata/
 shots/
 scratch/
 *.py
+.libs/

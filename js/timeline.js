@@ -118,12 +118,17 @@ export function renderTimeline() {
     }).join('');
   }
 
-  // 나레이션
+  // 나레이션 + 구간 음성(TTS·녹음)
   const nTrack = trackEl('narration');
   const nar = p && p.audio.narration;
-  if (nar) {
-    nTrack.innerHTML = `<div class="tl-block audio" data-audio="narration" style="left:${(nar.start || 0) * pps}px;width:${Math.max(6, (nar.duration || 2) * pps)}px"><span class="lbl">${escapeName(nar.name || '나레이션')}</span></div>`;
-  } else nTrack.innerHTML = '';
+  const voices = (p && p.audio.voice) || [];
+  nTrack.innerHTML = (nar
+    ? `<div class="tl-block audio" data-audio="narration" style="left:${(nar.start || 0) * pps}px;width:${Math.max(6, (nar.duration || 2) * pps)}px"><span class="lbl">${escapeName(nar.name || '나레이션')}</span></div>`
+    : '') + voices.map((v) => {
+    const left = (v.start || 0) * pps;
+    const w = Math.max(10, (v.duration || 1) * pps);
+    return `<div class="tl-block voice" data-voice="${v.id}" style="left:${left}px;width:${w}px"><span class="lbl">${escapeName(v.name || '음성')}</span></div>`;
+  }).join('');
 
   // BGM
   const bTrack = trackEl('bgm');
@@ -239,6 +244,14 @@ function onPointerDown(e) {
     const kind = audioBlock.dataset.audio;
     if (kind === 'narration') { emit('select:audio', 'narration'); seek(0); }
     else { emit('select:audio', 'bgm'); }
+    return;
+  }
+
+  const voiceBlock = e.target.closest('[data-voice]');
+  if (voiceBlock) {
+    const id = voiceBlock.dataset.voice;
+    const item = ((state.project.audio.voice) || []).find((v) => v.id === id);
+    if (item) { seek(item.start || 0); emit('select:audio', 'voice'); }
     return;
   }
 
