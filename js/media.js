@@ -228,6 +228,11 @@ export async function importAudioFile(file) {
   addAssetRecord(rec);
   await persistAsset(rec);
   const buf = await decodeAudio(id);
-  if (buf) { rec.duration = buf.duration; await persistAsset(rec); }
+  if (buf) {
+    rec.duration = buf.duration;
+    const live = getAsset(id);
+    if (live) live.duration = buf.duration;
+    await persistAsset(rec);
+  }
   return getAsset(id);
 }

@@ -86,8 +86,6 @@ export async function addMediaFiles(files) {
   if (added.length) {
     ensureSegments();
     const p = state.project;
-    if (p.segments.length === 1 && !p.segments[0].end) p.segments[0].end = totalDuration();
-    if (p.segments.length === 1) p.segments[0].end = Math.min(Math.max(p.segments[0].end, 0.5), totalDuration());
     state.sel.clip = p.clips.length - added.length;
     mixDirty();
     emit('project', { panels: ['clips', 'text'], select: true });

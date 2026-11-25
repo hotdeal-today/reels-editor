@@ -1,0 +1,5 @@
+# 검증용 산출물 (앱 동작과 무관)
+testdata/
+shots/
+scratch/
+*.py

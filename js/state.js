@@ -136,6 +136,14 @@ export function ensureSegments() {
     s.end = clamp(s.end, s.start + 0.2, Math.max(s.start + 0.2, dur || s.end));
     if (!s.pos) s.pos = {};
   }
+  // 글자를 아직 안 넣은 단일 구간은 영상 전체 길이를 덮도록
+  if (p.segments.length === 1 && dur > 0.3) {
+    const only = p.segments[0];
+    if (!(only.title || '').trim() && !(only.badge || '').trim() && !(only.subtitle || '').trim()) {
+      only.start = 0;
+      only.end = dur;
+    }
+  }
   p.segments.sort((a, b) => a.start - b.start);
 }
 export function textPos(key, t) {

@@ -174,10 +174,13 @@ function renderPresets() {
   el.innerHTML = PRESETS.map((p) => {
     const st = p.style;
     const color = st.color;
-    const bg = st.bg && st.bg.on ? `background:${st.bg.color};border-radius:${Math.min(10, st.bg.radius || 0)}px;padding:2px 6px;` : '';
-    const shadow = st.shadow && st.shadow.on ? `text-shadow:0 1px 4px rgba(0,0,0,.8);` : '';
-    return `<button class="preset" type="button" data-preset="${p.id}">
-      <span class="p-preview" style="color:${color};${bg}${shadow}">가나다</span>
+    const bg = st.bg && st.bg.on
+      ? `background:${st.bg.color};border-radius:${Math.min(9, Math.max(3, (st.bg.radius || 0) / 6))}px;`
+      : '';
+    const shadow = st.shadow && st.shadow.on ? `text-shadow:0 1px 5px rgba(0,0,0,.9);` : '';
+    const stroke = st.stroke && st.stroke.on ? `-webkit-text-stroke:.6px ${st.stroke.color};` : '';
+    return `<button class="preset" type="button" data-preset="${p.id}" title="${p.name}">
+      <span class="p-preview"><span class="p-badge" style="color:${color};${bg}${shadow}${stroke}">가나다</span></span>
       <span class="p-name">${p.name}</span>
     </button>`;
   }).join('');
@@ -192,6 +195,14 @@ function activeSeg() {
 
 function currentStyle() { return state.project.texts[state.sel.text]; }
 
+/** 지금 선택한 구간(없으면 전체 기본값)의 실제 위치 */
+function effectivePos(key) {
+  const st = state.project.texts[key];
+  const seg = activeSeg();
+  const p = seg && seg.pos && seg.pos[key];
+  return p ? { x: p.x, y: p.y } : { x: st.x, y: st.y };
+}
+
 function getPath(obj, path) { return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj); }
 function setPath(obj, path, val) {
   const parts = path.split('.');
@@ -204,6 +215,7 @@ export function renderStyleCard() {
   if (!styleCard) return;
   const st = currentStyle();
   const key = state.sel.text;
+  const pos = effectivePos(key);
   $('#styleTarget', pane).textContent = TEXT_LABEL[key];
   $$('#textTabs button', pane).forEach((b) => b.classList.toggle('on', b.dataset.texttab === key));
 
@@ -276,8 +288,8 @@ export function renderStyleCard() {
 
     <div class="row" style="margin-top:10px">
       <label>위치 X · Y</label>
-      <input type="number" data-pos="x" value="${Math.round(st.x)}" min="0" max="1080" step="1" style="width:64px">
-      <input type="number" data-pos="y" value="${Math.round(st.y)}" min="0" max="1920" step="1" style="width:64px">
+      <input type="number" data-pos="x" value="${Math.round(pos.x)}" min="0" max="1080" step="1" style="width:64px">
+      <input type="number" data-pos="y" value="${Math.round(pos.y)}" min="0" max="1920" step="1" style="width:64px">
       <span class="val" style="min-width:auto">px</span>
     </div>
     <div class="row">
@@ -470,11 +482,11 @@ function onSegInput(e) {
 /** 미리보기에서 드래그한 위치를 패널 숫자에 반영합니다. */
 export function syncPositionInputs() {
   if (!styleCard) return;
-  const st = currentStyle();
+  const pos = effectivePos(state.sel.text);
   const x = styleCard.querySelector('[data-pos="x"]');
   const y = styleCard.querySelector('[data-pos="y"]');
-  if (x) x.value = String(Math.round(st.x));
-  if (y) y.value = String(Math.round(st.y));
+  if (x) x.value = String(Math.round(pos.x));
+  if (y) y.value = String(Math.round(pos.y));
 }
 
 export function refreshTextPanel() {

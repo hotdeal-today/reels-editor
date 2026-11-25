@@ -92,7 +92,7 @@ function renderSpecs() {
   const dur = totalDuration();
   const w = state.project.export.width;
   const h = state.project.export.height;
-  const mbps = 8;
+  const mbps = w >= 1080 ? 8 : 4.5;
   const size = (mbps * 1000 * 1000 * dur) / 8;
   const specs = $('#specs', pane);
   specs.innerHTML = `
@@ -109,7 +109,7 @@ async function refreshSupport() {
   card.innerHTML = `<div class="codec-line"><span>확인 중…</span></div>`;
   const w = state.project.export.width, h = state.project.export.height;
   try {
-    support = await detectSupport(w, h, 30, 8000000);
+    support = await detectSupport(w, h, 30, w >= 1080 ? 8000000 : 4500000);
   } catch (e) { support = null; }
   if (!support) { card.innerHTML = `<div class="codec-line"><span>인코더 확인 실패</span></div>`; return; }
   const path = support.webcodecs ? 'WebCodecs (빠름)' : (support.realtime ? 'MediaRecorder (실시간)' : '지원 안 됨');
@@ -134,6 +134,8 @@ function escapeLog(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;
 function setProgress(p, sub) {
   const bar = $('#expProgress', pane);
   if (bar) bar.style.width = `${clamp(p * 100, 0, 100).toFixed(1)}%`;
+  const title = $('#expTitle');
+  if (title) title.textContent = p >= 1 ? '내보내기 완료!' : '내보내는 중…';
   const overlay = $('#exportOverlay');
   const ob = $('#expBar');
   const os = $('#expSub');
@@ -160,7 +162,7 @@ async function runExport() {
   const w = state.project.export.width, h = state.project.export.height;
   try {
     const result = await exportVideo({
-      width: w, height: h, fps: 30, bitrate: 8000000,
+      width: w, height: h, fps: 30, bitrate: w >= 1080 ? 8000000 : 4500000,
       realtime: !!state.project.export.realtime,
       onProgress: (p, sub) => setProgress(p, sub),
       onLog: (line) => log(line),
