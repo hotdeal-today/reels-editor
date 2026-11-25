@@ -1,9 +1,10 @@
 // panels/clips.js — 탭1: 컷 편집
 import { $, $$, clamp, emit, fmtSec, escapeHtml } from '../util.js';
-import { state, getAsset, clipDur, totalDuration, persist, ensureSegments, mixDirty } from '../state.js';
+import { state, getAsset, clipDur, totalDuration, persist, ensureSegments, mixDirty, mosaicOf } from '../state.js';
 import { importMediaFile } from '../media.js';
-import { seek } from '../player.js';
+import { seek, requestRender } from '../player.js';
 import { forgetAsset, isAssetUsed } from '../assets.js';
+import { setMosaicGuide, getMosaicGuide } from '../render.js';
 
 let pane = null;
 let listEl = null;
@@ -11,6 +12,7 @@ let detailEl = null;
 let picker = null;
 let replacePicker = null;
 let replaceIndex = -1;
+let mosaicTarget = 'global'; // 'global' | 'clip'
 
 export function initClipsPanel(el) {
   pane = el;
@@ -33,6 +35,11 @@ export function initClipsPanel(el) {
     <div class="sec">
       <div class="sec-head">선택한 클립 설정</div>
       <div id="clipDetail"></div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head">▦ 자막 모자이크 <span class="count">영상 속 기존 자막 가리기</span></div>
+      <div id="mosaicBox"></div>
     </div>
   `;
 
@@ -57,6 +64,10 @@ export function initClipsPanel(el) {
 
   detailEl.addEventListener('input', onDetailInput);
   detailEl.addEventListener('change', onDetailInput);
+  const mosaicBox = $('#mosaicBox', pane);
+  mosaicBox.addEventListener('input', onMosaicInput);
+  mosaicBox.addEventListener('change', onMosaicInput);
+  mosaicBox.addEventListener('click', onMosaicClick);
   listEl.addEventListener('click', onListClick);
   listEl.addEventListener('dragstart', onDragStart);
   listEl.addEventListener('dragover', onDragOver);
@@ -66,6 +77,140 @@ export function initClipsPanel(el) {
 
   renderList();
   renderDetail();
+  renderMosaic();
+}
+
+// ── 자막 모자이크 ─────────────────────────────────────
+function mosaicTargetObj(create) {
+  const clip = currentClip();
+  if (mosaicTarget === 'clip' && clip) {
+    if (!clip.mosaic && create) clip.mosaic = { ...mosaicOf(clip) };
+    return clip;
+  }
+  if (!state.project.mosaic) state.project.mosaic = { ...mosaicOf(null) };
+  return state.project;
+}
+
+function renderMosaic() {
+  const box = $('#mosaicBox', pane);
+  if (!box) return;
+  const clip = currentClip();
+  if (!clip) {
+    box.innerHTML = `<div class="card" style="color:var(--muted);font-size:11px">클립을 선택하면 모자이크 설정이 나타납니다.</div>`;
+    return;
+  }
+  const m = mosaicTarget === 'clip' && clip.mosaic ? { ...mosaicOf(clip) } : mosaicOf(null);
+  const isClip = mosaicTarget === 'clip';
+  const idx = state.project.clips.indexOf(clip);
+  const val = (k, unit) => `<span class="val" data-moval="${k}">${m[k] ?? 0}${unit}</span>`;
+
+  box.innerHTML = `
+    <div class="card">
+      <div class="row" style="gap:8px">
+        <label class="switch"><input type="checkbox" data-mos="on" ${m.on ? 'checked' : ''}> 모자이크 켜기</label>
+        <span class="grow"></span>
+        <label class="switch" title="미리보기에 영역을 점선으로 표시"><input type="checkbox" data-mos-guide ${getMosaicGuide() ? 'checked' : ''}> 가이드</label>
+      </div>
+      <div class="seg-btns" data-mostarget style="margin-bottom:8px">
+        <button type="button" data-mt="global" class="${isClip ? '' : 'on'}">전체 기본값</button>
+        <button type="button" data-mt="clip" class="${isClip ? 'on' : ''}">${idx + 1}번 클립만</button>
+      </div>
+      <div class="row">
+        <label>세로 위치</label>
+        <input type="range" class="grow" data-mos="y" min="0" max="100" step="1" value="${m.y}">
+        ${val('y', '%')}
+      </div>
+      <div class="row">
+        <label>높이</label>
+        <input type="range" class="grow" data-mos="h" min="3" max="50" step="1" value="${m.h}">
+        ${val('h', '%')}
+      </div>
+      <div class="row">
+        <label>너비</label>
+        <input type="range" class="grow" data-mos="w" min="10" max="100" step="1" value="${m.w}">
+        ${val('w', '%')}
+      </div>
+      <div class="row">
+        <label>모자이크 크기</label>
+        <input type="range" class="grow" data-mos="strength" min="6" max="60" step="1" value="${m.strength}">
+        ${val('strength', 'px')}
+      </div>
+      <div class="row">
+        <label>살짝 블러</label>
+        <input type="range" class="grow" data-mos="blur" min="0" max="10" step="1" value="${m.blur}">
+        ${val('blur', 'px')}
+      </div>
+      <div class="row" style="margin-top:2px;flex-wrap:wrap;gap:4px">
+        <button class="btn tiny" data-mos-act="toAll" type="button">모든 클립에 이 설정</button>
+        <button class="btn tiny ghost" data-mos-act="detach" type="button" ${isClip && clip.mosaic ? '' : 'disabled'}>이 클립 개별 설정 해제</button>
+      </div>
+      <div class="sec-note" style="margin:6px 0 0">
+        세로 위치는 화면 높이 기준 중심값입니다(아래쪽 자막이면 70~80%). 가이드를 켜면 미리보기에 점선으로 보입니다.
+        ${isClip ? '지금은 선택한 클립에만 적용됩니다.' : '지금은 모든 클립의 기본값을 바꾸고 있습니다.'}
+      </div>
+    </div>`;
+}
+
+function onMosaicInput(e) {
+  const t = e.target;
+  if (t.dataset.mosGuide != null) {
+    setMosaicGuide(t.checked);
+    requestRender();
+    return;
+  }
+  const key = t.dataset.mos;
+  if (!key) return;
+  const target = mosaicTargetObj(true);
+  const v = key === 'on' ? t.checked : Number(t.value);
+  if (key === 'on') target.mosaic.on = v;
+  else target.mosaic[key] = clamp(v, 0, 200);
+  const label = pane.querySelector(`[data-moval="${key}"]`);
+  if (label) label.textContent = `${target.mosaic[key]}${key === 'strength' || key === 'blur' ? 'px' : '%'}`;
+  mixDirty();
+  persist();
+  emit('project', { panels: [] });
+  requestRender();
+}
+
+function onMosaicClick(e) {
+  const mt = e.target.closest('[data-mt]');
+  if (mt) {
+    mosaicTarget = mt.dataset.mt;
+    const clip = currentClip();
+    if (mosaicTarget === 'clip' && clip && !clip.mosaic) {
+      clip.mosaic = { ...mosaicOf(clip) };
+      persist();
+      emit('project', { panels: [] });
+    }
+    renderMosaic();
+    requestRender();
+    return;
+  }
+  const act = e.target.closest('[data-mos-act]')?.dataset.mosAct;
+  if (!act) return;
+  const clip = currentClip();
+  if (act === 'toAll' && clip) {
+    const m = { ...mosaicOf(clip) };
+    state.project.mosaic = { ...m };
+    for (const c of state.project.clips) { if (c.mosaic) delete c.mosaic; }
+    mosaicTarget = 'global';
+    renderMosaic();
+    mixDirty();
+    persist();
+    emit('project', { panels: [] });
+    requestRender();
+    emit('toast', { msg: '이 모자이크 설정을 모든 클립에 적용했습니다.', type: 'ok' });
+    return;
+  }
+  if (act === 'detach' && clip) {
+    delete clip.mosaic;
+    mosaicTarget = 'global';
+    renderMosaic();
+    persist();
+    emit('project', { panels: [] });
+    requestRender();
+    emit('toast', { msg: '이 클립은 전체 모자이크 설정을 따릅니다.' });
+  }
 }
 
 export async function addMediaFiles(files) {
@@ -311,7 +456,7 @@ function onListClick(e) {
     state.sel.clip = i;
     emit('select:clip', i);
     seek(clipStartSafe(i));
-    renderList(); renderDetail();
+    renderList(); renderDetail(); renderMosaic();
     return;
   }
   if (act === 'up' && i > 0) {
@@ -337,7 +482,7 @@ function onListClick(e) {
   mixDirty();
   ensureSegments();
   emit('project', { panels: ['clips', 'text'], select: true });
-  renderList(); renderDetail();
+  renderList(); renderDetail(); renderMosaic();
 }
 
 // 세부 카드 내부 버튼 (속도/음소거/교체/초기화/미세조정)
@@ -409,11 +554,11 @@ function onDrop(e) {
   mixDirty();
   ensureSegments();
   emit('project', { panels: ['clips', 'text'], select: true });
-  renderList(); renderDetail();
+  renderList(); renderDetail(); renderMosaic();
 }
 
-export function refreshClips() { renderList(); renderDetail(); }
+export function refreshClips() { renderList(); renderDetail(); renderMosaic(); }
 export function setSelectedClip(i) {
   state.sel.clip = i;
-  renderList(); renderDetail();
+  renderList(); renderDetail(); renderMosaic();
 }

@@ -241,6 +241,30 @@ export function buildChatPrompt(topic) {
 }
 
 // ── Gemini 호출 ─────────────────────────────────────────
+export async function askGeminiText({ apiKey, model, prompt, temperature = 0.9, maxOutputTokens = 4096 }) {
+  if (!apiKey) throw new Error('API 키를 먼저 입력해 주세요.');
+  if (!model) throw new Error('모델을 먼저 확인해 주세요(연결 확인 버튼).');
+  const generationConfig = { temperature, maxOutputTokens, responseMimeType: 'application/json' };
+  if (/^gemini-2\.5/.test(model)) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  const res = await fetch(`${API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(apiMessage(res.status, text));
+  let json = {};
+  try { json = JSON.parse(text); } catch (e) { throw new Error('AI 응답을 해석하지 못했습니다.'); }
+  const cand = (json.candidates || [])[0];
+  if (!cand) {
+    const blocked = json.promptFeedback?.blockReason;
+    throw new Error(blocked ? `AI가 요청을 거절했습니다 (${blocked}).` : 'AI가 결과를 주지 않았습니다.');
+  }
+  const out = (cand.content?.parts || []).map((p) => p.text || '').join('\n').trim();
+  if (!out) throw new Error(`AI 응답이 비었습니다${cand.finishReason ? ` (${cand.finishReason})` : ''}.`);
+  return out;
+}
+
 export async function askGemini({ apiKey, model, prompt, frames = [], temperature = 0.85 }) {
   if (!apiKey) throw new Error('API 키를 먼저 입력해 주세요.');
   if (!model) throw new Error('모델을 먼저 확인해 주세요(연결 확인 버튼).');

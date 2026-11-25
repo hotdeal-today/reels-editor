@@ -161,7 +161,7 @@ function loop() {
   }
   state.time = t;
   syncVideos(t);
-  renderFrame(ctx, t);
+  renderFrame(ctx, t, { guide: true });
   updateTimeUI(t);
   raf = requestAnimationFrame(loop);
 }
@@ -196,7 +196,7 @@ export function seek(t) {
 export async function renderAt(t, opts = {}) {
   const target = t == null ? state.time : t;
   // 1) 즉시 한 번 — 영상 프레임이 준비되지 않아도 글자·구도는 바로 보이게
-  renderFrame(ctx, target);
+  renderFrame(ctx, target, { guide: true });
 
   const p = state.project;
   if (!p || opts.seekMedia === false) return;
@@ -211,7 +211,7 @@ export async function renderAt(t, opts = {}) {
   await waitVideoReady(v, 1500);
   await seekVideo(v, want);
   // 2) 정확한 영상 프레임으로 다시
-  renderFrame(ctx, target);
+  renderFrame(ctx, target, { guide: true });
 }
 
 const renderNow = debounce(() => { renderAt(state.time); updateTimeUI(state.time); }, 24);

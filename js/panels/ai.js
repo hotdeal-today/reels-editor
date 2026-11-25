@@ -3,9 +3,13 @@ import { $, $$, clamp, emit, escapeHtml, fmtSec, downloadBlob } from '../util.js
 import { state, totalDuration, persist, getAsset } from '../state.js';
 import {
   loadAiSettings, saveAiSettings, maskKey, listModels, pickModels,
-  buildChatPrompt, buildPrompt, collectFrames, askGemini, parsePlan, applyPlan,
+  buildChatPrompt, buildPrompt, collectFrames, askGemini, askGeminiText, parsePlan, applyPlan,
   autoLayout, applyDesignSet, VOICES, TTS_MODEL_CANDIDATES, TEXT_MODEL_CANDIDATES,
 } from '../ai.js';
+import {
+  CAPTION_CHANNELS, loadCaptionState, saveCaptionState, fetchBlogText,
+  buildCaptionPrompt, parseCaptions, checkNaverClipCaption, normalizeBlogUrl,
+} from '../captions.js';
 import { DESIGN_SETS } from '../presets.js';
 import {
   geminiTts, addVoiceClip, removeVoiceClip, voiceClips, previewSpeech, stopSpeech,
@@ -17,6 +21,7 @@ import { seek } from '../player.js';
 let pane = null;
 let rec = null;
 let busy = false;
+let capBusy = false;
 let availableModels = null; // { ids, text, tts }
 
 export function initAiPanel(el) {
@@ -29,6 +34,33 @@ export function initAiPanel(el) {
       <b>✨ AI 자동 세팅</b>
       <p>사진·영상을 올린 뒤 한 번만 누르면 <b>컷·모션·전환·디자인·효과음·마지막 멘트</b>가 자동으로 배치됩니다.
       아래 <b>무료 원클릭</b>은 키가 필요 없고, <b>Gemini</b>는 무료 API 키를 넣으면 사진을 읽고 제목·자막까지 만들어 줍니다.</p>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head">📝 블로그 글 → 5채널 캡션 <span class="count">클립·인스타·유튜브·페이스북·스레드</span></div>
+      <div class="card ai-card">
+        <div class="row">
+          <label>블로그 URL</label>
+          <input type="text" class="grow" id="capUrl" placeholder="https://blog.naver.com/… (선택)" spellcheck="false" autocomplete="off">
+          <button class="btn tiny" id="capFetch" type="button">가져오기 시도</button>
+        </div>
+        <div class="sec-note" style="margin:6px 0 7px">
+          네이버 블로그는 브라우저에서 직접 열람이 막히는 경우가 많아요. 실패하면 블로그 앱·PC에서 본문을 복사해 아래 칸에 붙여넣으면 바로 이어서 만들 수 있습니다.
+          (URL로 시도할 때는 주소만 무료 텍스트 추출 서비스로 전달됩니다.)
+        </div>
+        <textarea id="capBody" class="ai-textarea" rows="6" placeholder="블로그 본문을 붙여넣으세요 (제목 + 본문)"></textarea>
+        <div class="cap-meta" id="capMeta"></div>
+        <div class="row" style="gap:6px">
+          <button class="btn sm grow" id="capCopyPrompt" type="button">📋 프롬프트 복사</button>
+          <button class="btn sm ghost" id="capShowPrompt" type="button">보기</button>
+        </div>
+        <textarea id="capPromptText" class="ai-textarea hidden" rows="8" readonly></textarea>
+        <textarea id="capPaste" class="ai-textarea" rows="5" placeholder="AI가 준 결과를 그대로 붙여넣으세요. 5채널 캡션으로 나눠 담습니다."></textarea>
+        <button class="btn primary block" id="capFromPaste" type="button" style="margin-top:7px">📥 붙여넣은 결과 채우기</button>
+        <button class="btn primary block" id="capGenerate" type="button">✨ 5채널 캡션 만들기 (Gemini)</button>
+        <div class="ai-status hidden" id="capStatus"></div>
+        <div class="cap-out" id="capOut"></div>
+      </div>
     </div>
 
     <div class="sec">
@@ -150,14 +182,14 @@ export function initAiPanel(el) {
   `;
 
   // 값 채우기
-  $('#aiDesignSel', pane).value = s.design || 'neon';
-  $('#aiImageDur', pane).value = String(s.imageDur || 2.6);
+  $('#aiDesignSel', pane).value = s.design || 'neon';  $('#aiImageDur', pane).value = String(s.imageDur || 2.6);
   $('#aiUseSfx', pane).checked = s.useSfx !== false;
   $('#aiUseName', pane).checked = s.useName !== false;
   $('#aiTopic', pane).value = s.topic || '';
   $('#ttsVoice', pane).value = s.voice || 'Kore';
 
   bindEvents();
+  initCaptions();
   refreshAiPanel();
 }
 
@@ -654,4 +686,241 @@ export function refreshAiPanel() {
   if (!pane) return;
   saveSettingsFromUI();
   renderTts();
+}
+
+// ══ 블로그 글 → 5채널 캡션 ═══════════════════════════
+let capState = { url: '', body: '', captions: {} };
+let capSaveTimer = null;
+
+function capStatus(msg, type = '') {
+  const box = $('#capStatus', pane);
+  if (!box) return;
+  box.classList.remove('hidden', 'ok', 'err', 'warn');
+  if (!msg) { box.classList.add('hidden'); box.textContent = ''; return; }
+  if (type) box.classList.add(type);
+  box.textContent = msg;
+}
+
+function initCaptions() {
+  capState = loadCaptionState();
+  const urlEl = $('#capUrl', pane);
+  const bodyEl = $('#capBody', pane);
+  if (urlEl) urlEl.value = capState.url || '';
+  if (bodyEl) bodyEl.value = capState.body || '';
+  renderCapMeta();
+  renderCaptions();
+
+  urlEl.addEventListener('change', () => {
+    capState.url = urlEl.value.trim();
+    saveCaptionState({ url: capState.url });
+  });
+  bodyEl.addEventListener('input', () => {
+    capState.body = bodyEl.value;
+    renderCapMeta();
+    clearTimeout(capSaveTimer);
+    capSaveTimer = setTimeout(() => saveCaptionState({ body: capState.body }), 600);
+  });
+
+  $('#capFetch', pane).addEventListener('click', fetchBlogInto);
+  $('#capCopyPrompt', pane).addEventListener('click', async () => {
+    const body = ($('#capBody', pane).value || '').trim();
+    if (!body) { capStatus('본문을 먼저 붙여넣어 주세요.', 'err'); return; }
+    const text = buildCaptionPrompt(body, { url: ($('#capUrl', pane).value || '').trim() });
+    const ok = await copyPlain(text);
+    capStatus(ok ? '프롬프트를 복사했습니다. 무료 ChatGPT·Gemini 채팅에 붙여넣고, 받은 결과를 아래 칸에 붙여넣으세요.' : '복사가 막혔습니다. [보기]를 눌러 직접 복사해 주세요.', ok ? 'ok' : 'warn');
+  });
+  $('#capShowPrompt', pane).addEventListener('click', () => {
+    const ta = $('#capPromptText', pane);
+    if (ta.classList.contains('hidden')) {
+      const body = ($('#capBody', pane).value || '').trim();
+      if (!body) { capStatus('본문을 먼저 붙여넣어 주세요.', 'err'); return; }
+      ta.value = buildCaptionPrompt(body, { url: ($('#capUrl', pane).value || '').trim() });
+      ta.classList.remove('hidden');
+    } else {
+      ta.classList.add('hidden');
+    }
+  });
+  $('#capFromPaste', pane).addEventListener('click', () => {
+    const raw = ($('#capPaste', pane).value || '').trim();
+    if (!raw) { capStatus('AI가 준 결과를 먼저 붙여넣어 주세요.', 'err'); return; }
+    try {
+      const caps = parseCaptions(raw);
+      mergeCaptions(caps);
+      const n = CAPTION_CHANNELS.filter((c) => (caps[c.id] || '').trim()).length;
+      capStatus(`${n}개 채널 캡션을 채웠습니다. 각 칸에서 바로 수정하고 📋 복사하세요.`, 'ok');
+    } catch (e) {
+      capStatus(e.message || '결과를 나누지 못했습니다.', 'err');
+    }
+  });
+  $('#capGenerate', pane).addEventListener('click', generateCaptions);
+
+  const out = $('#capOut', pane);
+  out.addEventListener('input', (e) => {
+    const id = e.target.dataset.captext;
+    if (!id) return;
+    capState.captions[id] = e.target.value;
+    clearTimeout(capSaveTimer);
+    capSaveTimer = setTimeout(() => saveCaptionState({ captions: capState.captions }), 500);
+    updateCapFoot(id);
+  });
+  out.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-capcopy]');
+    if (!btn) return;
+    const id = btn.dataset.capcopy;
+    const ta = out.querySelector(`[data-captext="${id}"]`);
+    const text = ta ? ta.value : '';
+    if (!text.trim()) { capStatus('이 채널 캡션이 비었습니다.', 'err'); return; }
+    const ok = await copyPlain(text);
+    capStatus(ok ? `${CAPTION_CHANNELS.find((c) => c.id === id)?.label || ''} 캡션을 복사했습니다.` : '복사가 막혔습니다. 칸을 눌러 직접 복사해 주세요.', ok ? 'ok' : 'warn');
+  });
+}
+
+function renderCapMeta() {
+  const el = $('#capMeta', pane);
+  if (!el) return;
+  const len = (($('#capBody', pane)?.value) || '').length;
+  if (!len) { el.textContent = ''; el.classList.remove('warn'); return; }
+  el.textContent = `본문 ${len.toLocaleString()}자 ${len > 9000 ? '· 긴 글은 앞부분 9,000자까지만 씁니다' : ''}`;
+  el.classList.toggle('warn', len > 9000);
+}
+
+function renderCaptions() {
+  const out = $('#capOut', pane);
+  if (!out) return;
+  out.innerHTML = CAPTION_CHANNELS.map((ch) => {
+    const text = capState.captions[ch.id] || '';
+    return `<div class="cap-card" data-capcard="${ch.id}">
+      <div class="cap-head">
+        <b>${ch.icon} ${ch.label}</b>
+        <span class="grow"></span>
+        <button class="btn tiny" data-capcopy="${ch.id}" type="button">📋 복사</button>
+      </div>
+      <div class="cap-hint">${escapeHtml(ch.hint)}</div>
+      <textarea class="cap-text" data-captext="${ch.id}" rows="4" placeholder="아직 캡션이 없습니다. 위에서 만들거나 결과를 붙여넣으면 채워집니다.">${escapeHtml(text)}</textarea>
+      <div class="cap-foot"><span data-capcount="${ch.id}"></span><span data-capwarn="${ch.id}"></span></div>
+    </div>`;
+  }).join('');
+  for (const ch of CAPTION_CHANNELS) updateCapFoot(ch.id);
+}
+
+function updateCapFoot(id) {
+  const out = $('#capOut', pane);
+  if (!out) return;
+  const ta = out.querySelector(`[data-captext="${id}"]`);
+  const count = out.querySelector(`[data-capcount="${id}"]`);
+  const warn = out.querySelector(`[data-capwarn="${id}"]`);
+  const text = ta ? ta.value : '';
+  if (count) count.textContent = text.trim() ? `${text.trim().length}자` : '';
+  if (warn) {
+    if (id === 'naverClip' && text.trim()) {
+      const c = checkNaverClipCaption(text);
+      warn.textContent = c.ok ? `해시태그 ${c.tags}개 ✓` : `해시태그 ${c.tags}개 — #오늘클립챌린지 #클립크리에이터 + 연관 3개(총 5개) 권장`;
+      warn.className = c.ok ? 'ok' : 'warn';
+    } else {
+      warn.textContent = '';
+      warn.className = '';
+    }
+  }
+}
+
+function mergeCaptions(caps) {
+  for (const ch of CAPTION_CHANNELS) {
+    const v = (caps[ch.id] || '').trim();
+    if (v) capState.captions[ch.id] = v;
+  }
+  saveCaptionState({ captions: capState.captions });
+  renderCaptions();
+}
+
+async function fetchBlogInto() {
+  if (capBusy) return;
+  const input = $('#capUrl', pane).value;
+  const url = normalizeBlogUrl(input);
+  if (!url) { capStatus('블로그 주소를 먼저 입력해 주세요.', 'err'); return; }
+  $('#capUrl', pane).value = url;
+  capState.url = url;
+  const btn = $('#capFetch', pane);
+  capBusy = true;
+  btn.disabled = true;
+  btn.textContent = '가져오는 중…';
+  capStatus('본문을 가져오는 중… (최대 20초)', 'warn');
+  try {
+    const { text, via } = await fetchBlogText(url);
+    const ta = $('#capBody', pane);
+    ta.value = text;
+    capState.body = text;
+    saveCaptionState({ body: text, url });
+    renderCapMeta();
+    capStatus(`본문을 가져왔습니다 (${via} · ${text.length.toLocaleString()}자). 아래에서 캡션을 만들어 주세요.`, 'ok');
+  } catch (e) {
+    capStatus(`${e.message}${e.detail ? `  [시도: ${e.detail}]` : ''}`, 'err');
+    $('#capBody', pane).focus();
+  } finally {
+    capBusy = false;
+    btn.disabled = false;
+    btn.textContent = '가져오기 시도';
+  }
+}
+
+async function generateCaptions() {
+  const s = loadAiSettings();
+  const body = ($('#capBody', pane).value || '').trim();
+  if (!body) { capStatus('블로그 본문을 먼저 넣어 주세요. (URL 가져오기 또는 붙여넣기)', 'err'); return; }
+  if (body.length < 40) { capStatus('본문이 너무 짧습니다. 글 전체를 붙여넣어 주세요.', 'err'); return; }
+  if (!s.apiKey) {
+    capStatus('Gemini로 만들려면 무료 API 키가 필요합니다. 키가 없다면 위의 “📋 프롬프트 복사”로 무료 ChatGPT·Gemini 채팅을 쓰세요.', 'err');
+    return;
+  }
+  const btn = $('#capGenerate', pane);
+  if (capBusy) return;
+  capBusy = true;
+  btn.disabled = true;
+  let model = (availableModels && availableModels.text) || s.model;
+  try {
+    if (!availableModels) {
+      try {
+        const ids = await listModels(s.apiKey);
+        availableModels = pickModels(ids, s);
+        model = availableModels.text || model;
+        saveAiSettings({ model });
+        renderKeyState();
+      } catch (e) { /* 기본 모델로 시도 */ }
+    }
+    capStatus(`Gemini(${model})가 5채널 캡션을 만드는 중… (10~30초)`, 'warn');
+    const raw = await askGeminiText({
+      apiKey: s.apiKey,
+      model,
+      prompt: buildCaptionPrompt(body, { url: ($('#capUrl', pane).value || '').trim() }),
+    });
+    const caps = parseCaptions(raw);
+    mergeCaptions(caps);
+    const n = CAPTION_CHANNELS.filter((c) => (caps[c.id] || '').trim()).length;
+    capStatus(`5채널 캡션 준비 완료 — ${n}개 채널. 각 칸에서 고치고 📋 복사하세요.`, n === 5 ? 'ok' : 'warn');
+    const nu = $('#capUrl', pane).value.trim();
+    if (nu) saveCaptionState({ url: nu });
+  } catch (e) {
+    capStatus(e.message || '캡션을 만들지 못했습니다.', 'err');
+  } finally {
+    capBusy = false;
+    btn.disabled = false;
+  }
+}
+
+async function copyPlain(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e2) { return false; }
+  }
 }

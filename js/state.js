@@ -32,11 +32,21 @@ export function defaultStyle(key) {
   };
 }
 
+export const MOSAIC_DEFAULT = {
+  on: false,
+  y: 76,        // 모자이크 영역 중심 Y (%)
+  h: 18,        // 높이 (%)
+  w: 100,       // 너비 (%)
+  strength: 32, // 모자이크 한 칸 크기 (1080 기준 px)
+  blur: 4,      // 살짝 블러 (px)
+};
+
 export function defaultProject() {
   return {
     version: 1,
     name: '새 릴스',
     clips: [],
+    mosaic: { ...MOSAIC_DEFAULT },
     texts: {
       title: defaultStyle('title'),
       badge: defaultStyle('badge'),
@@ -188,6 +198,7 @@ export async function loadProject() {
         badge: { ...d.texts.badge, ...(p.texts && p.texts.badge) },
         subtitle: { ...d.texts.subtitle, ...(p.texts && p.texts.subtitle) },
       },
+      mosaic: { ...d.mosaic, ...(p.mosaic || {}) },
       audio: { narration: null, bgm: null, sfx: [], customSfx: [], voice: [], ...(p.audio || {}) },
       export: { ...d.export, ...(p.export || {}) },
       segments: Array.isArray(p.segments) && p.segments.length ? p.segments : d.segments,
@@ -198,6 +209,15 @@ export async function loadProject() {
 }
 
 export function mixDirty() { state.mixDirty = true; }
+
+/** 클립에 따로 저장한 모자이크 설정이 있으면 그것을, 없으면 전체 설정을 씁니다. */
+export function mosaicOf(clip) {
+  const p = state.project;
+  const base = (p && p.mosaic) || MOSAIC_DEFAULT;
+  const merged = { ...MOSAIC_DEFAULT, ...base };
+  if (clip && clip.mosaic) return { ...merged, ...clip.mosaic };
+  return merged;
+}
 
 export function newProject() {
   state.project = defaultProject();

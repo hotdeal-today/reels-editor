@@ -2,12 +2,15 @@
 import { $, emit, clamp, downloadBlob, fmtSec } from '../util.js';
 import { state, totalDuration, persist } from '../state.js';
 import { exportVideo, detectSupport, saveThumbnail } from '../export.js';
+import { buildCarousel, releaseCards, carouselFileName } from '../carousel.js';
 import { pause } from '../player.js';
 
 let pane = null;
 let busy = false;
 let support = null;
 let logLines = [];
+let carBusy = false;
+let carCards = [];
 
 export function initExportPanel(el) {
   pane = el;
@@ -43,6 +46,20 @@ export function initExportPanel(el) {
     </div>
 
     <div class="sec">
+      <div class="sec-head">🖼️ 캐러셀 이미지 세트</div>
+      <div class="sec-note">1번 카드(대표 썸네일 + 제목·배지) + 클립별 카드(그 구간 자막)를 JPG로 만듭니다. 인스타 피드는 4:5, 클립·스토리는 9:16.</div>
+      <div class="seg-btns" id="carRatio" style="margin-bottom:8px">
+        <button type="button" data-car-ratio="4:5">4:5 피드 (1080×1350)</button>
+        <button type="button" data-car-ratio="9:16">9:16 세로 (1080×1920)</button>
+      </div>
+      <button class="btn primary block" id="doCarousel" type="button">🖼️ 캐러셀 이미지 생성</button>
+      <div class="progress-wrap"><i id="carProgress"></i></div>
+      <div class="car-note" id="carNote">아직 만든 카드가 없습니다.</div>
+      <div class="car-grid" id="carGrid"></div>
+      <button class="btn block" id="carSaveAll" type="button" style="margin-top:8px;display:none">📥 카드 모두 저장 (JPG)</button>
+    </div>
+
+    <div class="sec">
       <div class="sec-head">대표 썸네일</div>
       <div class="sec-note">지금 미리보기 프레임을 JPG로 저장합니다. (인스타·클립 대표 이미지용)</div>
       <button class="btn block" id="doThumb" type="button">현재 프레임 썸네일 저장 (thumbnail.jpg)</button>
@@ -75,10 +92,33 @@ export function initExportPanel(el) {
 
   $('#doExport', pane).addEventListener('click', () => runExport());
   $('#doThumb', pane).addEventListener('click', () => runThumb());
+  $('#carRatio', pane).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-car-ratio]');
+    if (!b) return;
+    state.project.export.carouselRatio = b.dataset.carRatio;
+    persist();
+    syncCarRatio();
+  });
+  $('#doCarousel', pane).addEventListener('click', () => runCarousel());
+  $('#carGrid', pane).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-carsave]');
+    if (!b) return;
+    const card = carCards.find((c) => String(c.index) === b.dataset.carsave);
+    if (!card || !card.blob) return;
+    downloadBlob(card.blob, carouselFileName(state.project.name, card.index + 1, carCards.ratio || '4:5'));
+    emit('toast', { msg: `카드 ${card.index + 1}장을 저장했습니다.`, type: 'ok' });
+  });
+  $('#carSaveAll', pane).addEventListener('click', () => saveAllCards());
 
   syncRes();
+  syncCarRatio();
   renderSpecs();
   refreshSupport();
+}
+
+function syncCarRatio() {
+  const cur = state.project.export.carouselRatio || '4:5';
+  pane.querySelectorAll('[data-car-ratio]').forEach((b) => b.classList.toggle('on', b.dataset.carRatio === cur));
 }
 
 function syncRes() {
@@ -207,8 +247,87 @@ function safeName(s) {
   return String(s).replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40) || 'reels';
 }
 
+// ── 캐러셀 이미지 세트 ───────────────────────────────
+async function runCarousel() {
+  if (carBusy) return;
+  if (!state.project.clips.length) { emit('toast', { msg: '먼저 사진이나 영상을 추가하세요.', type: 'err' }); return; }
+  carBusy = true;
+  pause();
+  const btn = $('#doCarousel', pane);
+  btn.disabled = true;
+  btn.textContent = '카드 만드는 중…';
+  const bar = $('#carProgress', pane);
+  const note = $('#carNote', pane);
+  if (bar) bar.style.width = '2%';
+  if (note) note.textContent = '카드를 만드는 중…';
+  const ratio = state.project.export.carouselRatio || '4:5';
+  try {
+    releaseCards(carCards);
+    carCards = [];
+    const res = await buildCarousel({
+      ratio,
+      onProgress: (p, sub) => {
+        if (bar) bar.style.width = `${Math.round(clamp(p, 0, 1) * 100)}%`;
+        if (note) note.textContent = `카드 만드는 중… ${sub || ''}`;
+      },
+    });
+    carCards = res.cards;
+    carCards.ratio = res.ratio;
+    renderCarGrid();
+    if (note) note.textContent = `${res.cards.length}장 완성 (${res.w}×${res.h}) — 카드를 눌러 개별 저장하거나 아래 버튼으로 모두 저장하세요.`;
+    emit('toast', { msg: `캐러셀 카드 ${res.cards.length}장을 만들었습니다.`, type: 'ok' });
+  } catch (e) {
+    console.error(e);
+    if (note) note.textContent = '카드를 만들지 못했습니다: ' + (e.message || e);
+    emit('toast', { msg: '캐러셀 생성 실패: ' + (e.message || e), type: 'err' });
+  } finally {
+    carBusy = false;
+    btn.disabled = false;
+    btn.textContent = '🖼️ 캐러셀 이미지 생성';
+    if (bar) bar.style.width = carCards.length ? '100%' : '0%';
+    setTimeout(() => { if (bar && carCards.length) bar.style.width = '0%'; }, 1200);
+  }
+}
+
+function renderCarGrid() {
+  const grid = $('#carGrid', pane);
+  const saveAll = $('#carSaveAll', pane);
+  if (!grid) return;
+  if (!carCards.length) {
+    grid.innerHTML = '';
+    if (saveAll) saveAll.style.display = 'none';
+    return;
+  }
+  const ratio = carCards.ratio || '4:5';
+  grid.innerHTML = carCards.map((c) => `
+    <div class="car-item" data-carindex="${c.index}">
+      <div class="car-thumb ${ratio === '9:16' ? 'tall' : ''}"><img src="${c.url}" alt="카드 ${c.index + 1}" loading="lazy"></div>
+      <div class="car-cap">
+        <b>${c.index + 1}</b>
+        <span>${escapeLog(c.label || '')}</span>
+        <button class="btn tiny" data-carsave="${c.index}" type="button">저장</button>
+      </div>
+    </div>`).join('');
+  if (saveAll) { saveAll.style.display = 'block'; saveAll.textContent = `📥 카드 ${carCards.length}장 모두 저장 (JPG)`; }
+}
+
+async function saveAllCards() {
+  if (!carCards.length) return;
+  const ratio = carCards.ratio || '4:5';
+  for (let i = 0; i < carCards.length; i++) {
+    const c = carCards[i];
+    if (!c.blob) continue;
+    downloadBlob(c.blob, carouselFileName(state.project.name, c.index + 1, ratio));
+    $('#carNote', pane).textContent = `저장 중… ${i + 1}/${carCards.length}`;
+    await new Promise((r) => setTimeout(r, 420));
+  }
+  $('#carNote', pane).textContent = `${carCards.length}장을 모두 저장했습니다. (브라우저가 여러 파일 다운로드를 물어보면 허용해 주세요)`;
+  emit('toast', { msg: `카드 ${carCards.length}장을 저장했습니다.`, type: 'ok' });
+}
+
 export function refreshExportPanel() {
   if (!pane || !state.project) return;
   syncRes();
+  syncCarRatio();
   renderSpecs();
 }

@@ -1,5 +1,5 @@
 // render.js — 9:16 프레임 합성 (미리보기·내보내기 공용)
-import { state, getAsset, locate, clipDur } from './state.js';
+import { state, getAsset, locate, clipDur, mosaicOf } from './state.js';
 import { videoFor, imageFor } from './media.js';
 import { clamp, hexToRgba } from './util.js';
 
@@ -7,6 +7,83 @@ export const DESIGN_W = 1080;
 export const DESIGN_H = 1920;
 const FADE = 0.45;
 let lastRects = [];
+let guideOn = false;
+
+/** 미리보기에서 모자이크 영역 가이드(점선)를 보여줄지 */
+export function setMosaicGuide(v) { guideOn = !!v; }
+export function getMosaicGuide() { return guideOn; }
+
+// 픽셀 모자이크용 임시 캔버스 (프레임마다 새로 만들지 않도록 재사용)
+const scratch = document.createElement('canvas');
+const sctx = scratch.getContext('2d');
+
+/** 모자이크 설정(백분율)을 1080×1920 좌표계 사각형으로 바꿉니다. */
+export function mosaicRect(m, designW = DESIGN_W, designH = DESIGN_H) {
+  const w = clamp(Number(m && m.w != null ? m.w : 100), 1, 100) / 100 * designW;
+  const h = clamp(Number(m && m.h != null ? m.h : 18), 1, 100) / 100 * designH;
+  const cy = clamp(Number(m && m.y != null ? m.y : 76), 0, 100) / 100 * designH;
+  return { x: (designW - w) / 2, y: cy - h / 2, w, h };
+}
+
+/**
+ * 지금 그려져 있는 프레임의 일부 영역만 픽셀 모자이크(+살짝 블러)로 덮습니다.
+ * 기존 영상·사진에 이미 박혀 있는 외국 자막을 가릴 때 사용합니다.
+ */
+export function applyMosaic(ctx, m, alpha = 1, designW = DESIGN_W, designH = DESIGN_H) {
+  if (!m || !m.on) return;
+  const canvas = ctx.canvas;
+  if (!canvas || !canvas.width || !canvas.height) return;
+  const r = mosaicRect(m, designW, designH);
+  const step = clamp(Number(m.strength) || 18, 4, 80);
+  const blur = clamp(Number(m.blur) || 0, 0, 12);
+  const bw = Math.max(1, Math.round(r.w / step));
+  const bh = Math.max(1, Math.round(r.h / step));
+  const sx = canvas.width / designW;
+  const sy = canvas.height / designH;
+
+  if (scratch.width !== bw || scratch.height !== bh) {
+    scratch.width = bw;
+    scratch.height = bh;
+  }
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.imageSmoothingEnabled = false;
+  sctx.clearRect(0, 0, bw, bh);
+  try {
+    sctx.drawImage(canvas, r.x * sx, r.y * sy, r.w * sx, r.h * sy, 0, 0, bw, bh);
+  } catch (e) { return; }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.imageSmoothingEnabled = false;
+  if (blur > 0) ctx.filter = `blur(${blur}px)`;
+  try { ctx.drawImage(scratch, 0, 0, bw, bh, r.x, r.y, r.w, r.h); } catch (e) { /* 무시 */ }
+  ctx.restore();
+}
+
+function drawMosaicGuide(ctx) {
+  const p = state.project;
+  if (!p) return;
+  const loc = locate(state.time);
+  const clip = (loc && loc.clip) || p.clips[0];
+  const m = mosaicOf(clip);
+  if (!m.on) return;
+  const r = mosaicRect(m);
+  ctx.save();
+  ctx.setLineDash([18, 14]);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(255,216,77,.95)';
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+  ctx.setLineDash([]);
+  ctx.font = '700 30px "Noto Sans KR", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(255,216,77,.95)';
+  ctx.fillText('모자이크', r.x + 10, r.y - 10);
+  ctx.restore();
+}
 
 export function prepareCtx(ctx, w, h) {
   ctx.setTransform(w / DESIGN_W, 0, 0, h / DESIGN_H, 0, 0);
@@ -84,6 +161,10 @@ function drawClip(ctx, clip, local, alpha) {
   if (f !== 'none') ctx.filter = f;
   try { ctx.drawImage(src, dx, dy, dw, dh); } catch (e) { /* 프레임 미준비 */ }
   ctx.restore();
+
+  // 기존 자막 가리기 — 이 클립에 모자이크가 켜져 있으면 영역만 픽셀 처리
+  const mosaic = mosaicOf(clip);
+  if (mosaic.on) applyMosaic(ctx, mosaic, alpha);
 }
 
 function drawTextBlock(ctx, st, text, x, y) {
@@ -156,7 +237,7 @@ function drawTexts(ctx, t) {
 }
 
 /** 프레임 한 장 그리기. 캔버스 크기는 어떤 값이든 1080x1920 좌표계로 변환됩니다. */
-export function renderFrame(ctx, t) {
+export function renderFrame(ctx, t, opts = {}) {
   const canvas = ctx.canvas;
   prepareCtx(ctx, canvas.width, canvas.height);
   ctx.save();
@@ -190,6 +271,7 @@ export function renderFrame(ctx, t) {
   }
 
   drawTexts(ctx, t);
+  if (opts.guide && guideOn) drawMosaicGuide(ctx);
   ctx.restore();
 }
 
