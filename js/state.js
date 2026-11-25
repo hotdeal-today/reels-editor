@@ -34,12 +34,15 @@ export function defaultStyle(key) {
 
 export const MOSAIC_DEFAULT = {
   on: false,
-  y: 76,        // 모자이크 영역 중심 Y (%)
-  h: 18,        // 높이 (%)
-  w: 100,       // 너비 (%)
-  strength: 32, // 모자이크 한 칸 크기 (1080 기준 px)
-  blur: 4,      // 살짝 블러 (px)
+  y: 78,        // 가림 영역 중심 Y (%) — 하단 자막 글자 줄 주변
+  h: 9,         // 높이 (%) — 글자 한 줄만
+  w: 68,        // 너비 (%) — 양옆 배경은 건드리지 않음
+  strength: 0,  // 모자이크 조각 크기 (1080 기준 px, 0 = 픽셀화 없이 희뿌연 블러만)
+  blur: 11,     // 희뿌연 블러 (px)
 };
+
+// 예전 기본값(배경까지 넓게 덮는 굵은 블록 모자이크) — 저장본을 새 기본값으로 옮길 때 씁니다.
+const LEGACY_MOSAIC_DEFAULT = { y: 76, h: 18, w: 100, strength: 32, blur: 4 };
 
 export function defaultProject() {
   return {
@@ -203,6 +206,8 @@ export async function loadProject() {
       export: { ...d.export, ...(p.export || {}) },
       segments: Array.isArray(p.segments) && p.segments.length ? p.segments : d.segments,
     };
+    migrateMosaic(state.project.mosaic);
+    for (const c of state.project.clips || []) { if (c.mosaic) migrateMosaic(c.mosaic); }
   }
   mixDirty();
   return state.project;
@@ -217,6 +222,13 @@ export function mosaicOf(clip) {
   const merged = { ...MOSAIC_DEFAULT, ...base };
   if (clip && clip.mosaic) return { ...merged, ...clip.mosaic };
   return merged;
+}
+
+/** 예전 기본값 그대로인 저장본은 새 기본값(글자 영역만 희뿌연 블러)으로 옮깁니다. */
+function migrateMosaic(m) {
+  if (!m || m.on) return;
+  const same = Object.keys(LEGACY_MOSAIC_DEFAULT).every((k) => Number(m[k]) === LEGACY_MOSAIC_DEFAULT[k]);
+  if (same) Object.assign(m, { y: MOSAIC_DEFAULT.y, h: MOSAIC_DEFAULT.h, w: MOSAIC_DEFAULT.w, strength: MOSAIC_DEFAULT.strength, blur: MOSAIC_DEFAULT.blur });
 }
 
 export function newProject() {

@@ -38,7 +38,7 @@ export function initClipsPanel(el) {
     </div>
 
     <div class="sec">
-      <div class="sec-head">▦ 자막 모자이크 <span class="count">영상 속 기존 자막 가리기</span></div>
+      <div class="sec-head">▦ 자막 가림 <span class="count">희뿌연 블러 · 모자이크</span></div>
       <div id="mosaicBox"></div>
     </div>
   `;
@@ -96,7 +96,7 @@ function renderMosaic() {
   if (!box) return;
   const clip = currentClip();
   if (!clip) {
-    box.innerHTML = `<div class="card" style="color:var(--muted);font-size:11px">클립을 선택하면 모자이크 설정이 나타납니다.</div>`;
+    box.innerHTML = `<div class="card" style="color:var(--muted);font-size:11px">클립을 선택하면 자막 가림 설정이 나타납니다.</div>`;
     return;
   }
   const m = mosaicTarget === 'clip' && clip.mosaic ? { ...mosaicOf(clip) } : mosaicOf(null);
@@ -107,7 +107,7 @@ function renderMosaic() {
   box.innerHTML = `
     <div class="card">
       <div class="row" style="gap:8px">
-        <label class="switch"><input type="checkbox" data-mos="on" ${m.on ? 'checked' : ''}> 모자이크 켜기</label>
+        <label class="switch"><input type="checkbox" data-mos="on" ${m.on ? 'checked' : ''}> 자막 가리기 켜기</label>
         <span class="grow"></span>
         <label class="switch" title="미리보기에 영역을 점선으로 표시"><input type="checkbox" data-mos-guide ${getMosaicGuide() ? 'checked' : ''}> 가이드</label>
       </div>
@@ -131,13 +131,13 @@ function renderMosaic() {
         ${val('w', '%')}
       </div>
       <div class="row">
-        <label>모자이크 크기</label>
-        <input type="range" class="grow" data-mos="strength" min="6" max="60" step="1" value="${m.strength}">
+        <label>모자이크 조각</label>
+        <input type="range" class="grow" data-mos="strength" min="0" max="60" step="1" value="${m.strength}">
         ${val('strength', 'px')}
       </div>
       <div class="row">
-        <label>살짝 블러</label>
-        <input type="range" class="grow" data-mos="blur" min="0" max="10" step="1" value="${m.blur}">
+        <label>희뿌연 블러</label>
+        <input type="range" class="grow" data-mos="blur" min="0" max="40" step="1" value="${m.blur}">
         ${val('blur', 'px')}
       </div>
       <div class="row" style="margin-top:2px;flex-wrap:wrap;gap:4px">
@@ -145,7 +145,8 @@ function renderMosaic() {
         <button class="btn tiny ghost" data-mos-act="detach" type="button" ${isClip && clip.mosaic ? '' : 'disabled'}>이 클립 개별 설정 해제</button>
       </div>
       <div class="sec-note" style="margin:6px 0 0">
-        세로 위치는 화면 높이 기준 중심값입니다(아래쪽 자막이면 70~80%). 가이드를 켜면 미리보기에 점선으로 보입니다.
+        세로 위치는 화면 높이 기준 중심값입니다(아래쪽 자막이면 75~80%). 가장자리는 원본과 부드럽게 섞여 경계가 드러나지 않습니다.
+        모자이크 조각은 0이면 끔(희뿌연 블러만), 4px부터 픽셀화가 더해집니다. 원문 글자가 큼직하면 블러를 20~30px로 올리세요. 가이드를 켜면 미리보기에 점선으로 보입니다.
         ${isClip ? '지금은 선택한 클립에만 적용됩니다.' : '지금은 모든 클립의 기본값을 바꾸고 있습니다.'}
       </div>
     </div>`;
@@ -199,7 +200,7 @@ function onMosaicClick(e) {
     persist();
     emit('project', { panels: [] });
     requestRender();
-    emit('toast', { msg: '이 모자이크 설정을 모든 클립에 적용했습니다.', type: 'ok' });
+    emit('toast', { msg: '이 자막 가림 설정을 모든 클립에 적용했습니다.', type: 'ok' });
     return;
   }
   if (act === 'detach' && clip) {
@@ -209,7 +210,7 @@ function onMosaicClick(e) {
     persist();
     emit('project', { panels: [] });
     requestRender();
-    emit('toast', { msg: '이 클립은 전체 모자이크 설정을 따릅니다.' });
+    emit('toast', { msg: '이 클립은 전체 자막 가림 설정을 따릅니다.' });
   }
 }
 
