@@ -217,28 +217,11 @@ function bindEvents() {
     if (el.tagName === 'INPUT' && el.type === 'text') el.addEventListener('blur', saveSettingsFromUI);
   });
 
-  let oneClickArmed = 0;
   $('#aiOneClick', pane).addEventListener('click', () => {
     saveSettingsFromUI();
     const s = loadAiSettings();
     const hasText = (state.project.segments || []).some((sg) => (sg.title || sg.badge || sg.subtitle || '').trim());
-    if (hasText && Date.now() - oneClickArmed > 5000) {
-      oneClickArmed = Date.now();
-      const b = $('#aiOneClick', pane);
-      b.textContent = '⚠️ 기존 자막이 지워집니다 — 한 번 더 누르세요';
-      b.classList.add('danger');
-      setTimeout(() => {
-        if (Date.now() - oneClickArmed >= 4800) {
-          b.textContent = '⚡ 원클릭 자동 배치';
-          b.classList.remove('danger');
-          oneClickArmed = 0;
-        }
-      }, 5000);
-      return;
-    }
-    oneClickArmed = 0;
-    $('#aiOneClick', pane).textContent = '⚡ 원클릭 자동 배치';
-    $('#aiOneClick', pane).classList.remove('danger');
+    if (hasText && !window.confirm('기존 구간·자막·효과음이 새로 배치됩니다(지금 쓴 글자는 사라집니다). 계속할까요?\n\n글자를 지키려면 [취소] 후 💾 .json 저장을 먼저 해 두세요.')) return;
     try {
       const res = autoLayout({ design: s.design, imageDur: s.imageDur, useSfx: s.useSfx, useName: s.useName });
       emit('project', { panels: ['clips', 'text', 'audio'] });
