@@ -158,6 +158,7 @@ export function initAiPanel(el) {
           </select>
         </div>
         <button class="btn primary block" id="ttsGenAll" type="button">🗣 전체 자막 TTS 만들기 (Gemini)</button>
+        <div class="ai-warn hidden" id="ttsStaleNote" style="margin-top:8px"></div>
         <div class="row" style="margin-top:8px">
           <label>브라우저 음성</label>
           <select class="grow" id="ttsLocalVoice">
@@ -595,6 +596,8 @@ function bindEvents() {
 
   $('#ttsSegList', pane).addEventListener('click', onSegAction);
   $('#ttsVoiceList', pane).addEventListener('click', onVoiceAction);
+  const staleBox = $('#ttsStaleNote', pane);
+  if (staleBox) staleBox.addEventListener('click', onVoiceAction);
   $('#ttsVoiceList', pane).addEventListener('input', (e) => {
     const id = e.target.dataset.voicevol;
     if (!id) return;
@@ -689,6 +692,7 @@ function renderVoiceList() {
   const items = voiceClips();
   const countEl = $('#ttsVoiceCount', pane);
   if (countEl) countEl.textContent = items.length ? `${items.length}개` : '';
+  renderStaleNote();
   if (!items.length) {
     box.innerHTML = `<div class="ai-empty">아직 구간 음성이 없습니다. 위에서 TTS·녹음·파일로 넣을 수 있습니다.</div>`;
     return;
@@ -819,9 +823,26 @@ async function onSegAction(e) {
   }
 }
 
+function renderStaleNote() {
+  const el = $('#ttsStaleNote', pane);
+  if (!el) return;
+  const segIds = new Set((state.project.segments || []).map((s) => s.id));
+  const stale = voiceClips().filter((v) => v.segId && !segIds.has(v.segId));
+  if (!stale.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  el.innerHTML = `지금 자막과 맞지 않는 <b>옛 나레이션 ${stale.length}개</b>가 남아 있습니다(자막이 새로 만들어지기 전 것).
+    <button class="btn tiny danger" id="ttsClearStale" type="button" style="margin-left:6px">지우기</button>`;
+}
+
 function onVoiceAction(e) {
+  if (e.target.closest('#ttsClearStale')) {
+    const n = purgeOldNarration();
+    renderTts();
+    emit('project', { panels: ['audio', 'ai'] });
+    emit('toast', { msg: `자막과 맞지 않던 옛 나레이션 ${n}개를 지웠습니다.`, type: 'ok' });
+    return;
+  }
   const btn = e.target.closest('[data-voiceact]');
-  if (!btn) return;
   const id = btn.dataset.voiceid;
   if (btn.dataset.voiceact === 'del') {
     removeVoiceClip(id);
