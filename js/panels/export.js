@@ -3,7 +3,7 @@ import { $, emit, clamp, downloadBlob, fmtSec } from '../util.js';
 import { state, totalDuration, persist } from '../state.js';
 import { exportVideo, detectSupport, saveThumbnail } from '../export.js';
 import { buildCarousel, releaseCards, carouselFileName, rebuildCarouselCard, rebuildCoverCard, CAROUSEL_COUNTS, CAROUSEL_DEFAULT_COUNT } from '../carousel.js';
-import { pause } from '../player.js';
+import { pause, requestRender } from '../player.js';
 
 let pane = null;
 let busy = false;
@@ -314,6 +314,7 @@ async function runCarousel() {
     });
     carCards = res.cards;
     carCards.ratio = res.ratio;
+    requestRender();
     renderCarGrid();
     if (note) {
       const short = res.limited && res.notice ? ` ${res.notice}` : '';
@@ -392,6 +393,7 @@ async function rerenderCardText(index, value) {
     if (card.url) { try { URL.revokeObjectURL(card.url); } catch (e) {} }
     carCards[pos] = fresh;
     updateCardDom(fresh);
+    requestRender();
     const note = $('#carNote', pane);
     if (note) note.textContent = `카드 ${index + 1} 문구를 바꿨습니다 — 저장·모두 저장하면 이 문구로 저장됩니다.`;
   } catch (e) {
@@ -429,6 +431,7 @@ async function reshotCard(index, t) {  if (carBusy || !carCards.length) return;
     const fresh = await rebuildCarouselCard({ ratio, t, index });
     if (card.url) { try { URL.revokeObjectURL(card.url); } catch (e) {} }
     carCards[carCards.findIndex((c) => c.index === index)] = fresh;
+    requestRender();
     renderCarGrid();
     if (note) note.textContent = `카드 ${index + 1}을 ${Number(fresh.t).toFixed(1)}초 지점으로 다시 찍었습니다.`;
     emit('toast', { msg: `카드 ${index + 1} 시점을 ${Number(fresh.t).toFixed(1)}초로 바꿨습니다.`, type: 'ok' });
