@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="9:16 세로 릴스·클립 편집기. 모든 사진·영상·음성은 브라우저 안에서만 처리됩니다.">
+<title>릴스 스튜디오 · 9:16 세로 영상 편집기</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d0f13'/%3E%3Crect x='17' y='11' width='30' height='42' rx='7' fill='%23ffd84d'/%3E%3Cpath d='M28 24l12 8-12 8z' fill='%230d0f13'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Do+Hyeon&family=Gowun+Batang:wght@400;700&family=Jua&family=Nanum+Gothic:wght@400;700;800&family=Nanum+Pen+Script&family=Noto+Sans+KR:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script>
+  /* 진단용: 콘솔/런타임 오류를 모아 둡니다. 화면에는 영향이 없습니다. */
+  window.__errors = [];
+  window.addEventListener('error', function (e) {
+    window.__errors.push('error: ' + (e.message || (e.error && e.error.message) || 'unknown') + (e.filename ? ' @' + e.filename + ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    window.__errors.push('rejection: ' + ((r && (r.message || r.name)) || String(r)));
+  });
+</script>
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+      </span>
+      <div class="brand-text">
+        <b>릴스 스튜디오</b>
+        <small>9:16 세로 영상 편집기</small>
+      </div>
+    </div>
+
+    <div class="proj">
+      <input id="projectName" class="proj-name" type="text" value="새 릴스" aria-label="프로젝트 이름" spellcheck="false">
+      <span id="saveStatus" class="save-status"><i></i> 자동 저장</span>
+    </div>
+
+    <div class="top-actions">
+      <span id="durBadge" class="dur-badge">0.0초</span>
+      <button id="btnHelp" class="btn ghost" type="button">단축키</button>
+      <button id="btnNew" class="btn ghost" type="button">새 프로젝트</button>
+      <button id="btnExportQuick" class="btn primary" type="button">내보내기</button>
+    </div>
+  </header>
+
+  <main class="work">
+
+    <section class="stage" aria-label="미리보기">
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="preview" width="540" height="960"></canvas>
+        <div id="emptyState" class="empty-state">
+          <div class="empty-inner">
+            <div class="empty-icon">＋</div>
+            <b>사진과 영상을 끌어다 놓으세요</b>
+            <span>JPG · PNG · WEBP · MP4 · MOV · WEBM</span>
+            <button class="btn primary" id="emptyPick" type="button">파일 선택</button>
+            <em>파일은 서버로 전송되지 않고 이 브라우저 안에서만 처리됩니다.</em>
+          </div>
+        </div>
+        <div id="dropHint" class="drop-hint hidden"><span>여기에 놓으면 클립으로 추가됩니다</span></div>
+        <div id="exportOverlay" class="export-overlay hidden">
+          <div class="exp-card">
+            <div class="exp-title" id="expTitle">내보내는 중…</div>
+            <div class="exp-bar"><i id="expBar"></i></div>
+            <div class="exp-sub" id="expSub">0%</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="transport">
+        <button id="btnPlay" class="play-btn" type="button" aria-label="재생">
+          <svg viewBox="0 0 24 24" width="18" height="18" class="ic-play"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 24" width="18" height="18" class="ic-pause"><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/></svg>
+        </button>
+        <span class="time-now" id="timeNow">00:00.0</span>
+        <input id="scrub" class="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="재생 위치">
+        <span class="time-total" id="timeTotal">00:00.0</span>
+        <button id="btnMute" class="icon-btn" type="button" title="미리보기 음소거" aria-label="미리보기 음소거">
+          <svg viewBox="0 0 24 24" width="17" height="17"><path d="M4 9h3l4-3.5v13L7 15H4zM15 8.5a5 5 0 010 7M17.5 6a8 8 0 010 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </section>
+
+    <aside class="inspector" aria-label="편집 컨트롤">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="clips" role="tab" type="button"><span>1</span>컷 편집</button>
+        <button class="tab" data-tab="text" role="tab" type="button"><span>2</span>제목·배지·자막</button>
+        <button class="tab" data-tab="audio" role="tab" type="button"><span>3</span>음성·BGM·효과음</button>
+        <button class="tab" data-tab="export" role="tab" type="button"><span>4</span>내보내기</button>
+      </nav>
+      <div class="tab-panes" id="tabPanes">
+        <div class="pane active" data-pane="clips"></div>
+        <div class="pane" data-pane="text"></div>
+        <div class="pane" data-pane="audio"></div>
+        <div class="pane" data-pane="export"></div>
+      </div>
+    </aside>
+
+    <section class="timeline" id="timeline" aria-label="타임라인"></section>
+  </main>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <b id="modalTitle">안내</b>
+      <button class="icon-btn" id="modalClose" type="button" aria-label="닫기">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
+<input id="globalFilePicker" type="file" multiple accept="image/*,video/*" hidden>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
