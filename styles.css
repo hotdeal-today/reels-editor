@@ -904,6 +904,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 }
 .car-cap span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .car-cap .btn { flex: 0 0 auto; }
+.car-text {
+  display: block; width: 100%; margin: 0; padding: 4px 6px 6px;
+  background: #0d1117; border: 0; border-top: 1px solid var(--line);
+  color: var(--text); font-size: 10.5px; line-height: 1.3;
+}
+.car-text::placeholder { color: #5d6675; }
+.car-text:focus { outline: 1px solid var(--accent); outline-offset: -1px; background: #0a0e14; }
 
 @media (max-width: 520px) {
   .car-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

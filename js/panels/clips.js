@@ -5,6 +5,7 @@ import { importMediaFile } from '../media.js';
 import { seek, requestRender } from '../player.js';
 import { forgetAsset, isAssetUsed } from '../assets.js';
 import { setMosaicGuide, getMosaicGuide } from '../render.js';
+import { ensureSubtitleBeats } from '../ai.js';
 
 let pane = null;
 let listEl = null;
@@ -24,6 +25,25 @@ export function initClipsPanel(el) {
     </div>
     <input id="clipPicker" type="file" accept="image/*,video/*" multiple hidden>
     <input id="clipReplacePicker" type="file" accept="image/*,video/*" hidden>
+
+    <div class="sec" style="margin-top:14px">
+      <div class="sec-head">✂️ 목표 총 길이 <span class="count">자동 컷 맞추기</span></div>
+      <div class="seg-btns" id="fitTargets">
+        <button type="button" data-fit="15">15초</button>
+        <button type="button" data-fit="18">18초</button>
+        <button type="button" data-fit="20">20초</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label>직접 입력</label>
+        <input type="number" class="grow" id="fitCustom" min="2" max="180" step="0.5" placeholder="초" style="padding:4px 8px">
+        <span class="val">초</span>
+      </div>
+      <button class="btn primary block" id="fitCuts" type="button" style="margin-top:6px">⚡ 자동 컷 맞추기</button>
+      <div class="sec-note" style="margin:6px 0 0">
+        영상은 너무 앞부분만 잘리지 않게 <b>앞~중간(35%) 지점</b>부터, 사진은 고르게 나누어 총 길이를 목표 초수에 딱 맞춥니다.
+        마음에 안 들면 아래 클립별 <b>시작 지점·표시 길이</b>로 직접 조절하세요.
+      </div>
+    </div>
 
     <div class="sec" style="margin-top:14px">
       <div class="sec-head">클립 <span class="count" id="clipCount">0개</span><span class="grow"></span>
@@ -64,6 +84,21 @@ export function initClipsPanel(el) {
 
   detailEl.addEventListener('input', onDetailInput);
   detailEl.addEventListener('change', onDetailInput);
+  const fitBox = $('#fitTargets', pane);
+  fitBox.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-fit]');
+    if (!b) return;
+    fitBox.querySelectorAll('[data-fit]').forEach((x) => x.classList.toggle('on', x === b));
+    const custom = $('#fitCustom', pane);
+    if (custom) custom.value = b.dataset.fit;
+    runAutoFit(Number(b.dataset.fit));
+  });
+  $('#fitCuts', pane).addEventListener('click', () => {
+    const custom = Number($('#fitCustom', pane).value);
+    const on = fitBox.querySelector('[data-fit].on');
+    const target = custom > 0 ? custom : (on ? Number(on.dataset.fit) : 18);
+    runAutoFit(target);
+  });
   const mosaicBox = $('#mosaicBox', pane);
   mosaicBox.addEventListener('input', onMosaicInput);
   mosaicBox.addEventListener('change', onMosaicInput);
@@ -116,6 +151,11 @@ function renderMosaic() {
         <button type="button" data-mt="clip" class="${isClip ? 'on' : ''}">${idx + 1}번 클립만</button>
       </div>
       <div class="row">
+        <label>가로 위치</label>
+        <input type="range" class="grow" data-mos="x" min="0" max="100" step="1" value="${m.x != null ? m.x : 50}">
+        ${val('x', '%')}
+      </div>
+      <div class="row">
         <label>세로 위치</label>
         <input type="range" class="grow" data-mos="y" min="0" max="100" step="1" value="${m.y}">
         ${val('y', '%')}
@@ -145,7 +185,8 @@ function renderMosaic() {
         <button class="btn tiny ghost" data-mos-act="detach" type="button" ${isClip && clip.mosaic ? '' : 'disabled'}>이 클립 개별 설정 해제</button>
       </div>
       <div class="sec-note" style="margin:6px 0 0">
-        세로 위치는 화면 높이 기준 중심값입니다(아래쪽 자막이면 75~80%). 가장자리는 원본과 부드럽게 섞여 경계가 드러나지 않습니다.
+        <b>미리보기 캔버스에서 블러 박스를 마우스·손가락으로 직접 끌어 옮길 수 있습니다.</b> 끄는 동안 점선 박스와 가로·세로 위치가 보이고, 내보내기(MP4·캐러셀·썸네일)에는 들어가지 않습니다.
+        위치는 화면 기준 중심값입니다(가로 50% = 가운데, 아래쪽 자막이면 세로 75~80%). 가장자리는 원본과 부드럽게 섞여 경계가 드러나지 않습니다.
         모자이크 조각은 0이면 끔(희뿌연 블러만), 4px부터 픽셀화가 더해집니다. 원문 글자가 큼직하면 블러를 20~30px로 올리세요. 가이드를 켜면 미리보기에 점선으로 보입니다.
         ${isClip ? '지금은 선택한 클립에만 적용됩니다.' : '지금은 모든 클립의 기본값을 바꾸고 있습니다.'}
       </div>
@@ -164,7 +205,7 @@ function onMosaicInput(e) {
   const target = mosaicTargetObj(true);
   const v = key === 'on' ? t.checked : Number(t.value);
   if (key === 'on') target.mosaic.on = v;
-  else target.mosaic[key] = clamp(v, 0, 200);
+  else target.mosaic[key] = clamp(v, 0, 100);
   const label = pane.querySelector(`[data-moval="${key}"]`);
   if (label) label.textContent = `${target.mosaic[key]}${key === 'strength' || key === 'blur' ? 'px' : '%'}`;
   mixDirty();
@@ -266,6 +307,108 @@ async function replaceClip(index, file) {
 
 function currentClip() { return state.project.clips[state.sel.clip] || null; }
 
+// ── 목표 총 길이로 자동 컷 맞추기 ─────────────────────
+function videoCap(clip) {
+  if (clip.kind === 'image') return 15;
+  const src = Math.max(0.3, Number(clip.srcDuration) || (getAsset(clip.assetId) && getAsset(clip.assetId).duration) || clipDur(clip));
+  return src / Math.max(0.25, Number(clip.speed) || 1);
+}
+
+/**
+ * 목표 총 길이에 맞춰 각 클립의 시작 지점·표시 길이를 자동 배분합니다.
+ * · 영상: 쓸 수 있는 길이 안에서 앞~중간(35%) 지점부터 잡아 너무 앞만 잘리지 않게
+ * · 사진: 고르게 나눔 (너무 짧거나 길지 않게 0.6~15초)
+ * · 짧은 영상이 배분보다 짧으면 자기 최대치만 쓰고, 남는 시간은 다른 클립에 재분배
+ */
+export function autoFitCuts(targetSec) {
+  const p = state.project;
+  const clips = p.clips || [];
+  if (!clips.length) throw new Error('먼저 사진이나 영상을 추가하세요.');
+  const target = clamp(Number(targetSec) || 18, 2, 180);
+  const n = clips.length;
+  const cap = clips.map(videoCap);
+  const share = new Array(n).fill(0);
+  const fixed = new Array(n).fill(false);
+  let remaining = target;
+  let open = n;
+  for (let iter = 0; iter < n + 2; iter++) {
+    const base = remaining / Math.max(1, open);
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      if (fixed[i]) continue;
+      if (cap[i] < base - 1e-6) {
+        share[i] = cap[i];
+        fixed[i] = true;
+        remaining -= cap[i];
+        open -= 1;
+        changed = true;
+      }
+    }
+    if (!changed) {
+      for (let i = 0; i < n; i++) if (!fixed[i]) share[i] = base;
+      break;
+    }
+  }
+
+  clips.forEach((c, i) => {
+    const d = Math.max(0.3, share[i] || 0);
+    if (c.kind === 'image') {
+      c.duration = clamp(Math.round(d * 1000) / 1000, 0.3, 15);
+      return;
+    }
+    const src = Math.max(0.3, Number(c.srcDuration) || (getAsset(c.assetId) && getAsset(c.assetId).duration) || clipDur(c));
+    const speed = Math.max(0.25, Number(c.speed) || 1);
+    const span = clamp(d * speed, 0.3, src);
+    const room = Math.max(0, src - span);
+    c.trimIn = Math.round(clamp(room * 0.35, 0, room) * 1000) / 1000;
+    c.trimOut = Math.round(Math.min(src, c.trimIn + span) * 1000) / 1000;
+  });
+
+  // 총 길이 오차 보정 — 마지막으로 조절 가능한 클립에서 흡수해 목표에 딱 맞춤
+  const totalNow = () => clips.reduce((a, c) => a + clipDur(c), 0);
+  let diff = target - totalNow();
+  for (let i = clips.length - 1; i >= 0 && Math.abs(diff) > 0.02; i--) {
+    const c = clips[i];
+    if (c.kind === 'image') {
+      const cur = Number(c.duration) || 3;
+      const nd = clamp(cur + diff, 0.3, 15);
+      c.duration = Math.round(nd * 1000) / 1000;
+      diff -= (c.duration - cur);
+      continue;
+    }
+    const src = Math.max(0.3, Number(c.srcDuration) || clipDur(c));
+    const speed = Math.max(0.25, Number(c.speed) || 1);
+    const cur = clipDur(c);
+    const nd = clamp(cur + diff, 0.3, src / speed);
+    const span = nd * speed;
+    c.trimIn = Math.round(clamp(Number(c.trimIn) || 0, 0, Math.max(0, src - span)) * 1000) / 1000;
+    c.trimOut = Math.round(Math.min(src, c.trimIn + span) * 1000) / 1000;
+    diff -= (clipDur(c) - cur);
+  }
+
+  ensureSegments();
+  // 자막이 있으면 새 길이에 맞춰 2~3초 박자로 다시 채움(끝에서 멈추지 않게)
+  if (state.project.segments.some((s) => String(s.subtitle || '').trim())) {
+    const reflowed = ensureSubtitleBeats(state.project.segments, totalDuration());
+    if (reflowed.length) state.project.segments = reflowed;
+  }
+  mixDirty();
+  persist();
+  emit('project', { panels: ['clips', 'text'], select: true });
+  renderList(); renderDetail(); renderMosaic();
+  const total = totalNow();
+  emit('toast', { msg: `총 ${total.toFixed(1)}초로 맞췄습니다 (클립 ${clips.length}개 · 목표 ${target}초)`, type: 'ok' });
+  return { total: Math.round(total * 10) / 10, target, clips: clips.length };
+}
+
+function runAutoFit(target) {
+  try {
+    autoFitCuts(target);
+  } catch (e) {
+    emit('toast', { msg: e.message || '자동 컷 맞추기에 실패했습니다.', type: 'err' });
+  }
+}
+
 export function renderList() {
   if (!listEl) return;
   const p = state.project;
@@ -328,19 +471,20 @@ export function renderDetail() {
       </div>
       ${isVideo ? `
         <div class="row">
-          <label>시작 (in)</label>
+          <label>시작 지점</label>
           <button class="btn tiny ghost" data-step="trimIn:-0.1" type="button">−</button>
           <input type="range" class="grow" data-field="trimIn" min="0" max="${maxT}" step="0.1" value="${(clip.trimIn || 0).toFixed(1)}">
           <button class="btn tiny ghost" data-step="trimIn:0.1" type="button">＋</button>
           <span class="val" data-val="trimIn">${(clip.trimIn || 0).toFixed(1)}초</span>
         </div>
         <div class="row">
-          <label>끝 (out)</label>
-          <button class="btn tiny ghost" data-step="trimOut:-0.1" type="button">−</button>
-          <input type="range" class="grow" data-field="trimOut" min="0" max="${maxT}" step="0.1" value="${(clip.trimOut || maxT).toFixed(1)}">
-          <button class="btn tiny ghost" data-step="trimOut:0.1" type="button">＋</button>
-          <span class="val" data-val="trimOut">${(clip.trimOut || maxT).toFixed(1)}초</span>
+          <label>표시 길이</label>
+          <button class="btn tiny ghost" data-step="duration:-0.1" type="button">−</button>
+          <input type="range" class="grow" data-field="duration" min="0.3" max="${maxT}" step="0.1" value="${clipDur(clip).toFixed(1)}">
+          <button class="btn tiny ghost" data-step="duration:0.1" type="button">＋</button>
+          <span class="val" data-val="duration">${clipDur(clip).toFixed(1)}초</span>
         </div>
+        <div class="row"><label>끝 지점</label><span class="grow" style="font-size:11px;color:var(--muted)"><b data-val="trimOut">${(clip.trimOut || maxT).toFixed(1)}초</b> / 원본 ${maxT.toFixed(1)}초</span></div>
         <div class="row"><label>재생 속도</label><div class="seg-btns grow" id="speedBtns">${speedBtns}</div></div>
         <div class="row">
           <label>원본 음성</label>
@@ -411,20 +555,42 @@ function onDetailInput(e) {
 
 function updateValLabel(field, v) {
   const el = detailEl.querySelector(`[data-val="${field}"]`);
-  if (!el) return;
-  const unit = ['trimIn', 'trimOut', 'duration'].includes(field) ? '초' : (['volume', 'zoom'].includes(field) ? (field === 'zoom' ? '%' : '%') : '');
-  if (field === 'duration' || field === 'trimIn' || field === 'trimOut') el.textContent = `${Number(v).toFixed(1)}초`;
-  else if (field === 'volume' || field === 'zoom') el.textContent = `${Math.round(v)}%`;
-  else el.textContent = `${v}`;
+  const clip = currentClip();
+  if (field === 'zoom' || field === 'volume') { if (el) el.textContent = `${Math.round(v)}%`; return; }
+  if (el && field === 'duration') el.textContent = `${clipDur(clip).toFixed(1)}초`;
+  if (el && field === 'trimIn') el.textContent = `${(Number(clip && clip.trimIn) || 0).toFixed(1)}초`;
+  if (el && field === 'trimOut') el.textContent = `${(Number(clip && clip.trimOut) || 0).toFixed(1)}초`;
+  if (el && !['duration', 'trimIn', 'trimOut', 'zoom', 'volume'].includes(field)) el.textContent = `${v}`;
+  // 한 칸을 바꾸면 다른 칸 숫자도 같이 맞춰 줌
+  if (clip && ['duration', 'trimIn', 'trimOut'].includes(field)) {
+    const d = detailEl.querySelector('[data-val="duration"]');
+    if (d) d.textContent = `${clipDur(clip).toFixed(1)}초`;
+    const i = detailEl.querySelector('[data-val="trimIn"]');
+    if (i) i.textContent = `${(Number(clip.trimIn) || 0).toFixed(1)}초`;
+    const o = detailEl.querySelector('[data-val="trimOut"]');
+    if (o) o.textContent = `${(Number(clip.trimOut) || 0).toFixed(1)}초`;
+  }
 }
 
 function applyField(clip, field, value) {
   if (field === 'trimIn') {
-    clip.trimIn = clamp(Number(value), 0, (clip.trimOut || 1) - 0.1);
+    const src = Math.max(0.3, Number(clip.srcDuration) || videoCap(clip));
+    const speed = Math.max(0.25, Number(clip.speed) || 1);
+    const span = clipDur(clip) * speed; // 화면에 보이는 길이는 그대로 두고 창만 옮깁니다
+    clip.trimIn = clamp(Number(value), 0, Math.max(0, src - span));
+    clip.trimOut = Math.min(src, clip.trimIn + span);
   } else if (field === 'trimOut') {
     clip.trimOut = clamp(Number(value), (clip.trimIn || 0) + 0.1, clip.srcDuration || Number(value));
   } else if (field === 'duration') {
-    clip.duration = clamp(Number(value), 0.5, 15);
+    if (clip.kind === 'video') {
+      const src = Math.max(0.3, Number(clip.srcDuration) || videoCap(clip));
+      const speed = Math.max(0.25, Number(clip.speed) || 1);
+      const span = clamp(Number(value) * speed, 0.3, src);
+      clip.trimIn = clamp(Number(clip.trimIn) || 0, 0, Math.max(0, src - span));
+      clip.trimOut = Math.min(src, clip.trimIn + span);
+    } else {
+      clip.duration = clamp(Number(value), 0.5, 15);
+    }
   } else if (field === 'volume') {
     clip.volume = clamp(Number(value), 0, 100);
   } else if (field === 'zoom') {
@@ -562,4 +728,22 @@ export function refreshClips() { renderList(); renderDetail(); renderMosaic(); }
 export function setSelectedClip(i) {
   state.sel.clip = i;
   renderList(); renderDetail(); renderMosaic();
+}
+
+/**
+ * 미리보기에서 블러 박스를 끌어 옮길 때, 패널의 슬라이더·숫자를 같이 따라오게 합니다.
+ * (패널을 통째로 다시 그리지 않아 드래그가 끊기지 않습니다)
+ */
+export function syncMosaicControls(values = {}) {
+  if (!pane) return;
+  const box = $('#mosaicBox', pane);
+  if (!box) return;
+  for (const key of ['x', 'y']) {
+    if (values[key] == null) continue;
+    const v = Math.round(Number(values[key]));
+    const input = box.querySelector(`input[data-mos="${key}"]`);
+    if (input) input.value = String(v);
+    const label = box.querySelector(`[data-moval="${key}"]`);
+    if (label) label.textContent = `${v}%`;
+  }
 }

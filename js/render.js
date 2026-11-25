@@ -8,10 +8,17 @@ export const DESIGN_H = 1920;
 const FADE = 0.45;
 let lastRects = [];
 let guideOn = false;
+let mosaicDragging = false;
 
 /** 미리보기에서 모자이크 영역 가이드(점선)를 보여줄지 */
 export function setMosaicGuide(v) { guideOn = !!v; }
 export function getMosaicGuide() { return guideOn; }
+/** 블러 박스를 끌고 있는 동안에는 가이드를 잠깐 보여 줍니다(내보내기에는 안 들어감). */
+export function setMosaicDragging(v) {
+  const next = !!v;
+  if (next !== mosaicDragging) { mosaicDragging = next; }
+}
+export function isMosaicDragging() { return mosaicDragging; }
 
 // 픽셀 모자이크용 임시 캔버스 (프레임마다 새로 만들지 않도록 재사용)
 const scratch = document.createElement('canvas');
@@ -27,8 +34,30 @@ const FEATHER_RATIO = 0.22; // 가림 영역 가장자리에서 스며드는 폭
 export function mosaicRect(m, designW = DESIGN_W, designH = DESIGN_H) {
   const w = clamp(Number(m && m.w != null ? m.w : 68), 1, 100) / 100 * designW;
   const h = clamp(Number(m && m.h != null ? m.h : 9), 1, 100) / 100 * designH;
+  // 가로(x)·세로(y) 모두 중심 % 값입니다. 예전 저장본에 x가 없으면 50(가운데)으로 봅니다.
+  const cx = clamp(Number(m && m.x != null ? m.x : 50), 0, 100) / 100 * designW;
   const cy = clamp(Number(m && m.y != null ? m.y : 78), 0, 100) / 100 * designH;
-  return { x: (designW - w) / 2, y: cy - h / 2, w, h };
+  return { x: cx - w / 2, y: cy - h / 2, w, h };
+}
+
+/**
+ * 미리보기 캔버스에서 블러 박스를 집었는지 확인합니다.
+ * 자막 가리기가 켜져 있고, 누른 지점이 지금 재생 위치의 블러 영역(여유 18px) 안이면
+ * 값을 실제로 바꿀 대상(target: 프로젝트 기본값 또는 그 클립 설정)까지 돌려줍니다.
+ */
+export function mosaicHitInfo(x, y) {
+  const p = state.project;
+  if (!p || !(p.clips || []).length) return null;
+  const loc = locate(state.time);
+  const clip = (loc && loc.clip) || p.clips[0];
+  const m = mosaicOf(clip);
+  if (!m.on) return null;
+  const r = mosaicRect(m);
+  const pad = 18;
+  if (x < r.x - pad || x > r.x + r.w + pad || y < r.y - pad || y > r.y + r.h + pad) return null;
+  // 이 클립에 따로 저장한 설정이 있으면 그쪽을, 없으면 전체 기본값을 움직입니다.
+  const target = clip && clip.mosaic ? clip.mosaic : p.mosaic;
+  return { clipIndex: p.clips.indexOf(clip), clip, m, rect: r, target, perClip: !!(clip && clip.mosaic) };
 }
 
 /**
@@ -136,17 +165,41 @@ function drawMosaicGuide(ctx) {
   const m = mosaicOf(clip);
   if (!m.on) return;
   const r = mosaicRect(m);
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
   ctx.save();
+  // 가로·세로 위치 안내선 (은은하게)
+  ctx.setLineDash([8, 14]);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,216,77,.32)';
+  ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, DESIGN_H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(DESIGN_W, cy); ctx.stroke();
+  // 영역 점선 박스
   ctx.setLineDash([18, 14]);
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = 'rgba(255,216,77,.95)';
+  ctx.lineWidth = 3.5;
+  ctx.strokeStyle = 'rgba(255,216,77,.92)';
   ctx.strokeRect(r.x, r.y, r.w, r.h);
+  // 중심 핸들
   ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,216,77,.92)';
+  ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+  ctx.fill();
+  // 위치 라벨
+  const xPct = Math.round(clamp(Number(m.x != null ? m.x : 50), 0, 100));
+  const yPct = Math.round(clamp(Number(m.y != null ? m.y : 78), 0, 100));
+  const label = `자막 가림 · 가로 ${xPct}% · 세로 ${yPct}%`;
   ctx.font = '700 30px "Noto Sans KR", sans-serif';
   ctx.textAlign = 'left';
-  ctx.textBaseline = 'bottom';
-  ctx.fillStyle = 'rgba(255,216,77,.95)';
-  ctx.fillText('자막 가림', r.x + 10, r.y - 10);
+  ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(label).width;
+  const ly = Math.max(38, r.y - 34);
+  ctx.fillStyle = 'rgba(10,13,18,.62)';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(r.x, ly - 27, tw + 26, 54, 12);
+  else ctx.rect(r.x, ly - 27, tw + 26, 54);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,216,77,.98)';
+  ctx.fillText(label, r.x + 13, ly);
   ctx.restore();
 }
 
@@ -336,7 +389,9 @@ export function renderFrame(ctx, t, opts = {}) {
   }
 
   drawTexts(ctx, t);
-  if (opts.guide && guideOn) drawMosaicGuide(ctx);
+  // 가이드(점선·위치 안내)는 미리보기에서만. 블러 박스를 끄는 동안에도 보여 줍니다.
+  // MP4·캐러셀·썸네일 내보내기는 renderFrame(ctx, t)로 가이드 없이 그립니다.
+  if (opts.guide && (guideOn || mosaicDragging)) drawMosaicGuide(ctx);
   ctx.restore();
 }
 

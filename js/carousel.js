@@ -1,16 +1,21 @@
 // carousel.js — 인스타·클립용 캐러셀 이미지 카드 만들기
 //  · 1번 카드: 대표 썸네일 + 제목 + 배지
-//  · 이후 카드: 클립(구간)별 사진/영상 프레임 + 해당 구간 자막
-//  · 모자이크 설정과 색감 보정도 그대로 반영
-import { state, getAsset, clipStart, clipDur, mosaicOf } from './state.js';
+//  · 2~N번 카드: 타임라인 전체에서 서로 다른 시점의 장면 (같은 그림이 두 번 나오지 않음)
+//  · 모자이크 설정(가로·세로 위치 포함)과 색감 보정도 그대로 반영
+import {
+  state, getAsset, clipStart, clipDur, totalDuration, locate, activeSegment, mosaicOf,
+} from './state.js';
 import { videoFor, imageFor, seekVideo, waitVideoReady } from './media.js';
 import { applyMosaic, DESIGN_W, DESIGN_H } from './render.js';
-import { clamp, hexToRgba } from './util.js';
+import { clamp, hexToRgba, fmtSec } from './util.js';
 
 export const CAROUSEL_RATIOS = {
   '4:5': { w: 1080, h: 1350, label: '4:5 피드' },
   '9:16': { w: 1080, h: 1920, label: '9:16 세로' },
 };
+
+export const CAROUSEL_COUNTS = [4, 5, 6];
+export const CAROUSEL_DEFAULT_COUNT = 5;
 
 function filterString(adj) {
   const b = 1 + (adj?.brightness || 0) / 100;
@@ -28,23 +33,26 @@ function makeCanvas(w, h) {
   return { c, ctx };
 }
 
-/** 9:16 기준으로 잡은 모자이크 위치를 카드 비율에 맞게 옮깁니다(크롭되는 만큼 같이 이동). */
+/** 9:16 기준으로 잡은 모자이크 위치(가로 x·세로 y 중심 %)를 카드 비율에 맞게 옮깁니다(크롭되는 만큼 같이 이동). */
 function mosaicForCard(m, W, H) {
   if (!m || !m.on) return m;
+  const dW = (clamp(Number(m.w != null ? m.w : 68), 1, 100) / 100) * DESIGN_W;
+  const dH = (clamp(Number(m.h != null ? m.h : 9), 1, 100) / 100) * DESIGN_H;
+  const dX = (clamp(Number(m.x != null ? m.x : 50), 0, 100) / 100) * DESIGN_W - dW / 2;
+  const dY = (clamp(Number(m.y != null ? m.y : 78), 0, 100) / 100) * DESIGN_H - dH / 2;
+  // 카드도 9:16 캔버스를 꽉 채우는(cover) 방식이므로 같은 배율로 옮긴 뒤 크롭 오프셋만큼 평행 이동합니다.
   const fit = Math.max(W / DESIGN_W, H / DESIGN_H);
   const offX = (DESIGN_W * fit - W) / 2;
   const offY = (DESIGN_H * fit - H) / 2;
-  const dW = (clamp(m.w ?? 100, 1, 100) / 100) * DESIGN_W;
-  const dH = (clamp(m.h ?? 18, 1, 100) / 100) * DESIGN_H;
-  const dX = (DESIGN_W - dW) / 2;
-  const dY = (clamp(m.y ?? 76, 0, 100) / 100) * DESIGN_H - dH / 2;
   const w = dW * fit, h = dH * fit;
-  const y = dY * fit - offY, x = dX * fit - offX;
+  const x = dX * fit - offX;
+  const y = dY * fit - offY;
   return {
     ...m,
+    x: clamp(((x + w / 2) / W) * 100, 0, 100),
+    y: clamp(((y + h / 2) / H) * 100, 0, 100),
     w: clamp((w / W) * 100, 1, 100),
     h: clamp((h / H) * 100, 1, 100),
-    y: clamp(((y + h / 2) / H) * 100, 0, 100),
   };
 }
 
@@ -191,15 +199,11 @@ function topScrim(ctx, W, H) {
   ctx.restore();
 }
 
-/** 이 클립 구간에 걸친 글자(자막 우선, 없으면 제목)를 찾습니다. */
-function textForClip(clip, index) {
-  const p = state.project;
-  const start = clipStart(index);
-  const end = start + clipDur(clip);
-  const segs = p.segments || [];
-  const hit = segs.find((s) => s.end > start + 0.05 && s.start < end - 0.05 && ((s.subtitle || '').trim() || (s.title || '').trim()));
-  if (hit) return ((hit.subtitle || '').trim() || (hit.title || '').trim());
-  return '';
+/** 그 시점에 화면에 떠 있는 자막(없으면 제목)을 찾습니다. */
+function textAt(t) {
+  const seg = activeSegment(t);
+  if (!seg) return '';
+  return (seg.subtitle || '').trim() || (seg.title || '').trim() || '';
 }
 
 function coverText() {
@@ -209,6 +213,110 @@ function coverText() {
   const title = (first.title || '').trim() || (p.name && p.name !== '새 릴스' ? p.name : '');
   const badge = (first.badge || '').trim();
   return { title, badge };
+}
+
+/** 1번(대표) 카드가 찍는 시점 — 클립 앞부분의 얼굴·간판이 잘 보이는 지점 */
+function coverMoment(clips) {
+  const first = clips[0];
+  if (!first) return null;
+  const dur = clipDur(first);
+  const local = clamp(dur * 0.35, 0, Math.max(0.01, Math.min(1.2, dur - 0.05)));
+  return { clipIndex: 0, clip: first, local, t: clipStart(0) + local };
+}
+
+function momentKey(m) {
+  return `${m.clip.assetId}:${m.local.toFixed(1)}`;
+}
+
+/**
+ * 2~N번 카드로 쓸 '서로 다른 장면'을 고릅니다.
+ * · 타임라인 전체(0~totalDuration)를 N등분해 각 구간 가운데를 목표로 잡고,
+ *   그 목표에 가장 가까우면서 아직 안 쓴 시점을 고릅니다. (자막이 있는 구간을 살짝 우선)
+ * · 사진은 같은 사진(assetId)이 두 번 나오지 않게 하고, 영상은 시점이 겹치지 않게 합니다.
+ * · 영상 1개만 있어도 그 안에서 여러 시점을 뽑아 4~6장이 서로 다른 장면이 됩니다.
+ * @returns {{moments:Array, requested:number, available:number, limited:boolean, notice:string}}
+ */
+export function planCarouselMoments(count) {
+  const p = state.project;
+  const clips = (p.clips || []).slice(0, 40);
+  const want = clamp(Math.round(Number(count) || CAROUSEL_DEFAULT_COUNT), 2, 10);
+  if (!clips.length) return { moments: [], requested: want, available: 0, limited: false, notice: '' };
+
+  const total = totalDuration();
+  const cover = coverMoment(clips);
+  const need = Math.max(0, want - 1);
+
+  const usedTimes = cover ? [cover.t] : [];
+  const usedKeys = new Set(cover ? [momentKey(cover)] : []);
+  const usedPhotoAssets = new Set();
+  const coverClip = clips[cover ? cover.clipIndex : 0];
+  if (coverClip && coverClip.kind === 'image') usedPhotoAssets.add(coverClip.assetId);
+
+  // 후보 시점 만들기
+  const cands = [];
+  clips.forEach((clip, i) => {
+    const start = clipStart(i);
+    const dur = clipDur(clip);
+    if (clip.kind === 'image') {
+      cands.push({ clipIndex: i, clip, local: dur / 2, t: start + dur / 2, photo: true, assetId: clip.assetId });
+      return;
+    }
+    const fracs = [0.08, 0.22, 0.36, 0.5, 0.64, 0.78, 0.92];
+    for (const f of fracs) {
+      const local = clamp(dur * f, 0.04, Math.max(0.05, dur - 0.05));
+      cands.push({ clipIndex: i, clip, local, t: start + local, photo: false, assetId: clip.assetId });
+    }
+  });
+
+  // 목표 시점 사이 최소 간격 — 너무 붙은 프레임이 두 장 나오지 않게
+  const minSep = clamp(total / Math.max(2, want) / 3.2, 0.25, 1.1);
+  const segText = (t) => {
+    const sg = activeSegment(t);
+    return !!(sg && ((sg.subtitle || '').trim() || (sg.title || '').trim()));
+  };
+
+  const picked = [];
+  for (let k = 1; k <= need; k++) {
+    const target = total * ((k + 0.5) / want);
+    const usable = (relaxed) => cands.filter((c) => {
+      if (usedKeys.has(momentKey(c))) return false;
+      if (c.photo && usedPhotoAssets.has(c.assetId)) return false;      // 같은 사진 중복 금지
+      if (!relaxed && usedTimes.some((t) => Math.abs(t - c.t) < minSep)) return false;
+      if (relaxed && usedTimes.some((t) => Math.abs(t - c.t) < 0.12)) return false;
+      return true;
+    });
+    let pool = usable(false);
+    if (!pool.length) pool = usable(true);
+    if (!pool.length) break;
+    let best = null;
+    let bestCost = Infinity;
+    for (const c of pool) {
+      // 자막이 떠 있는 구간은 살짝 우선 (자막이 같이 얹혀 정보가 살아남)
+      const cost = Math.abs(c.t - target) * (segText(c.t) ? 0.72 : 1);
+      if (cost < bestCost) { bestCost = cost; best = c; }
+    }
+    if (!best) break;
+    picked.push({ ...best, t: best.t });
+    usedKeys.add(momentKey(best));
+    usedTimes.push(best.t);
+    if (best.photo) usedPhotoAssets.add(best.assetId);
+  }
+
+  const available = picked.length + (cover ? 1 : 0);
+  const limited = available < want;
+  let notice = '';
+  if (limited) {
+    const photoCount = clips.filter((c) => c.kind === 'image').length;
+    const hasVideo = clips.some((c) => c.kind === 'video');
+    if (!hasVideo && photoCount) {
+      notice = `서로 다른 사진이 ${available}장뿐이라 ${available}장으로 만들었습니다. 4~6장을 채우려면 사진을 더 넣거나 영상을 하나 넣어 주세요.`;
+    } else if (photoCount) {
+      notice = `서로 다른 장면이 ${available}개뿐이라 ${available}장으로 만들었습니다(같은 사진은 두 번 넣지 않았습니다).`;
+    } else {
+      notice = `${available}장으로 만들었습니다.`;
+    }
+  }
+  return { moments: picked, requested: want, available, limited, notice, cover };
 }
 
 function waitImageLoad(img, timeout = 6000) {
@@ -223,7 +331,8 @@ function waitImageLoad(img, timeout = 6000) {
   });
 }
 
-async function prepareClipFrame(clip, index) {
+/** 그 클립의 local(클립 안에서의 재생 위치) 프레임이 실제로 그려질 때까지 기다립니다. */
+async function prepareClipFrame(clip, local) {
   if (!clip) return;
   if (clip.kind !== 'video') {
     // 사진은 디코딩이 끝나야 검은 화면이 아니라 실제 사진이 찍힙니다.
@@ -238,45 +347,38 @@ async function prepareClipFrame(clip, index) {
     try { v.load(); } catch (e) { /* 무시 */ }
     await waitVideoReady(v, 8000);
   }
-  const dur = Math.max(0.3, clipDur(clip));
-  const want = clamp((clip.trimIn || 0) + Math.min(dur * 0.35, 1.2) * (clip.speed || 1), 0, Math.max(0, (v.duration || 1) - 0.05));
+  const dur = Math.max(0.1, clipDur(clip));
+  const want = clamp((clip.trimIn || 0) + clamp(local, 0, dur) * (clip.speed || 1), 0, Math.max(0, (v.duration || 1) - 0.05));
   await seekVideo(v, want);
 }
 
-/**
- * 캐러셀 카드 세트를 만듭니다.
- * @returns {Promise<{ratio:string,w:number,h:number,cards:Array}>}
- */
-export async function buildCarousel({ ratio = '4:5', quality = 0.92, onProgress = () => {} } = {}) {
-  const p = state.project;
-  const clips = (p.clips || []).slice(0, 20);
-  if (!clips.length) throw new Error('먼저 사진이나 영상을 추가하세요.');
-  const spec = CAROUSEL_RATIOS[ratio] || CAROUSEL_RATIOS['4:5'];
-  const W = spec.w, H = spec.h;
-  const isWide = H / W < 1.5; // 4:5
-  const cards = [];
-  const titleStyle = p.texts.title;
-  const badgeStyle = p.texts.badge;
-  const subStyle = p.texts.subtitle;
-  const scale = W / DESIGN_W;
+function toCard(canvas, { index, label, title, t, clipIndex, quality, text, coverTitle, coverBadge }) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      resolve({
+        index, label, title, t, clipIndex,
+        text: text != null ? text : '',
+        coverTitle: coverTitle != null ? coverTitle : '',
+        coverBadge: coverBadge != null ? coverBadge : '',
+        w: canvas.width, h: canvas.height,
+        blob,
+        url: blob ? URL.createObjectURL(blob) : '',
+      });
+    }, 'image/jpeg', quality);
+  });
+}
 
-  if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+/** 카드 한 장 그리기 (대표 카드 / 장면 카드 공용) */
+function drawCardInto(ctx, W, H, { clip, local, isCover, title, badge, text, titleStyle, badgeStyle, subStyle, isWide, scale }) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  drawCover(ctx, clip, W, H);
+  const m = mosaicForCard(mosaicOf(clip), W, H);
+  if (m.on) applyMosaic(ctx, m, 1, W, H);
 
-  // 1) 대표 카드
-  onProgress(0, '대표 카드');
-  const first = clips[0];
-  await prepareClipFrame(first, 0);
-  {
-    const { c, ctx } = makeCanvas(W, H);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-    drawCover(ctx, first, W, H);
-    const m = mosaicForCard(mosaicOf(first), W, H);
-    if (m.on) applyMosaic(ctx, m, 1, W, H);
+  if (isCover) {
     topScrim(ctx, W, H);
     drawScrim(ctx, W, H, 0.8);
-
-    const { title, badge } = coverText();
     const titleSize = Math.round((isWide ? 78 : 84) * scale);
     const badgeSize = Math.round((isWide ? 34 : 38) * scale);
     const maxW = W * 0.84;
@@ -289,49 +391,147 @@ export async function buildCarousel({ ratio = '4:5', quality = 0.92, onProgress 
     if (title) {
       drawText(ctx, titleStyle, title, { cx: W / 2, cy: titleY, maxW, size: titleSize, maxLines: 3 });
     }
-    cards.push(await toCard(c, { index: 0, label: '대표', title, quality }));
+    return;
+  }
+  if (text) {
+    drawScrim(ctx, W, H, 0.8);
+    drawText(ctx, subStyle, text, {
+      cx: W / 2,
+      cy: H * (isWide ? 0.8 : 0.79),
+      maxW: W * 0.86,
+      size: Math.round((isWide ? 52 : 56) * scale),
+      maxLines: 3,
+    });
+  }
+}
+
+function cardStyle(ratio) {
+  const spec = CAROUSEL_RATIOS[ratio] || CAROUSEL_RATIOS['4:5'];
+  const W = spec.w, H = spec.h;
+  const p = state.project;
+  return {
+    W, H,
+    isWide: H / W < 1.5,
+    scale: W / DESIGN_W,
+    titleStyle: p.texts.title,
+    badgeStyle: p.texts.badge,
+    subStyle: p.texts.subtitle,
+  };
+}
+
+/**
+ * 캐러셀 카드 세트를 만듭니다.
+ * @param {{ratio?:string, count?:number, quality?:number, onProgress?:Function}} opts
+ * @returns {Promise<{ratio:string,w:number,h:number,cards:Array,requested:number,limited:boolean,notice:string}>}
+ */
+export async function buildCarousel({ ratio = '4:5', count = CAROUSEL_DEFAULT_COUNT, quality = 0.92, onProgress = () => {} } = {}) {
+  const p = state.project;
+  const clips = (p.clips || []).slice(0, 40);
+  if (!clips.length) throw new Error('먼저 사진이나 영상을 추가하세요.');
+  const { W, H, isWide, scale, titleStyle, badgeStyle, subStyle } = cardStyle(ratio);
+
+  const plan = planCarouselMoments(count);
+  const total = plan.moments.length + 1; // 대표 카드 포함
+  const cards = [];
+
+  if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+
+  // 1) 대표 카드
+  onProgress(0, '대표 카드');
+  const cover = plan.cover || { clip: clips[0], local: 0, clipIndex: 0 };
+  await prepareClipFrame(cover.clip, cover.local);
+  {
+    const { c, ctx } = makeCanvas(W, H);
+    const { title, badge } = coverText();
+    drawCardInto(ctx, W, H, {
+      clip: cover.clip, local: cover.local, isCover: true, title, badge,
+      titleStyle, badgeStyle, subStyle, isWide, scale,
+    });
+    cards.push(await toCard(c, {
+      index: 0, label: '대표', title, t: cover.t, clipIndex: cover.clipIndex, quality,
+      coverTitle: title, coverBadge: badge,
+    }));
   }
 
-  // 2) 클립별 카드
-  for (let i = 0; i < clips.length; i++) {
-    const clip = clips[i];
-    onProgress((i + 1) / clips.length, `${i + 1}/${clips.length} 클립`);
-    await prepareClipFrame(clip, i);
+  // 2) 서로 다른 장면 카드
+  for (let i = 0; i < plan.moments.length; i++) {
+    const mo = plan.moments[i];
+    onProgress((i + 1) / total, `${i + 2}장 · ${fmtSec(mo.t)}`);
+    await prepareClipFrame(mo.clip, mo.local);
     const { c, ctx } = makeCanvas(W, H);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-    drawCover(ctx, clip, W, H);
-    const m = mosaicForCard(mosaicOf(clip), W, H);
-    if (m.on) applyMosaic(ctx, m, 1, W, H);
-
-    const text = textForClip(clip, i);
-    if (text) {
-      drawScrim(ctx, W, H, 0.8);
-      drawText(ctx, subStyle, text, {
-        cx: W / 2,
-        cy: H * (isWide ? 0.8 : 0.79),
-        maxW: W * 0.86,
-        size: Math.round((isWide ? 52 : 56) * scale),
-        maxLines: 3,
-      });
-    }
-    cards.push(await toCard(c, { index: i + 1, label: `${i + 1}번 클립`, title: text, quality }));
+    const text = textAt(mo.t);
+    drawCardInto(ctx, W, H, {
+      clip: mo.clip, local: mo.local, isCover: false, text,
+      titleStyle, badgeStyle, subStyle, isWide, scale,
+    });
+    cards.push(await toCard(c, {
+      index: i + 1,
+      label: `${fmtSec(mo.t)} 지점${text ? ' · 자막' : ''}`,
+      title: text,
+      text,
+      t: mo.t,
+      clipIndex: mo.clipIndex,
+      quality,
+    }));
   }
 
   onProgress(1, '완료');
-  return { ratio, w: W, h: H, cards };
+  return {
+    ratio, w: W, h: H, cards,
+    requested: plan.requested,
+    limited: plan.limited,
+    notice: plan.notice,
+  };
 }
 
-function toCard(canvas, { index, label, title, quality }) {
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => {
-      resolve({
-        index, label, title,
-        w: canvas.width, h: canvas.height,
-        blob,
-        url: blob ? URL.createObjectURL(blob) : '',
-      });
-    }, 'image/jpeg', quality);
+/** 카드 한 장만 그 시점(초)·문구로 다시 찍습니다 — 카드별 시점·자막 직접 수정용 */
+export async function rebuildCarouselCard({ ratio = '4:5', t = 0, index = 1, text = null, quality = 0.92 } = {}) {
+  const p = state.project;
+  const clips = (p.clips || []).slice(0, 40);
+  if (!clips.length) throw new Error('먼저 사진이나 영상을 추가하세요.');
+  const { W, H, isWide, scale, titleStyle, badgeStyle, subStyle } = cardStyle(ratio);
+  const total = totalDuration();
+  const tt = clamp(Number(t) || 0, 0, Math.max(0, total - 0.05));
+  const loc = locate(tt) || { index: 0, clip: clips[0], local: 0 };
+  if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+  await prepareClipFrame(loc.clip, loc.local);
+  const { c, ctx } = makeCanvas(W, H);
+  const finalText = text != null ? String(text) : textAt(tt);
+  drawCardInto(ctx, W, H, {
+    clip: loc.clip, local: loc.local, isCover: false, text: finalText,
+    titleStyle, badgeStyle, subStyle, isWide, scale,
+  });
+  return toCard(c, {
+    index,
+    label: `${fmtSec(tt)} 지점${finalText && String(finalText).trim() ? ' · 자막' : ''}`,
+    title: finalText,
+    text: finalText,
+    t: tt,
+    clipIndex: loc.index,
+    quality,
+  });
+}
+
+/** 1번(대표) 카드만 제목·배지를 바꿔 다시 찍습니다. */
+export async function rebuildCoverCard({ ratio = '4:5', title = null, badge = null, quality = 0.92 } = {}) {
+  const p = state.project;
+  const clips = (p.clips || []).slice(0, 40);
+  if (!clips.length) throw new Error('먼저 사진이나 영상을 추가하세요.');
+  const { W, H, isWide, scale, titleStyle, badgeStyle, subStyle } = cardStyle(ratio);
+  const cover = coverMoment(clips);
+  if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+  await prepareClipFrame(cover.clip, cover.local);
+  const auto = coverText();
+  const finalTitle = title != null ? String(title) : auto.title;
+  const finalBadge = badge != null ? String(badge) : auto.badge;
+  const { c, ctx } = makeCanvas(W, H);
+  drawCardInto(ctx, W, H, {
+    clip: cover.clip, local: cover.local, isCover: true, title: finalTitle, badge: finalBadge,
+    titleStyle, badgeStyle, subStyle, isWide, scale,
+  });
+  return toCard(c, {
+    index: 0, label: '대표', title: finalTitle, t: cover.t, clipIndex: cover.clipIndex, quality,
+    coverTitle: finalTitle, coverBadge: finalBadge,
   });
 }
 
@@ -345,4 +545,9 @@ export function carouselFileName(projectName, index, ratio) {
   const base = String(projectName || 'reels').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 32) || 'reels';
   const r = String(ratio || '4:5').replace(':', 'x');
   return `${base}_carousel_${r}_${String(index).padStart(2, '0')}.jpg`;
+}
+
+// 검증용 읽기 전용 참고 (콘솔·자동 테스트에서 현재 로직 확인)
+if (typeof window !== 'undefined') {
+  window.__reelsCarousel = { planCarouselMoments, buildCarousel, rebuildCarouselCard, mosaicForCard };
 }

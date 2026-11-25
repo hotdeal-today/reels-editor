@@ -2,7 +2,7 @@
 import { $, emit, clamp, downloadBlob, fmtSec } from '../util.js';
 import { state, totalDuration, persist } from '../state.js';
 import { exportVideo, detectSupport, saveThumbnail } from '../export.js';
-import { buildCarousel, releaseCards, carouselFileName } from '../carousel.js';
+import { buildCarousel, releaseCards, carouselFileName, rebuildCarouselCard, rebuildCoverCard, CAROUSEL_COUNTS, CAROUSEL_DEFAULT_COUNT } from '../carousel.js';
 import { pause } from '../player.js';
 
 let pane = null;
@@ -11,6 +11,8 @@ let support = null;
 let logLines = [];
 let carBusy = false;
 let carCards = [];
+const cardTextTimers = new Map();
+let cardBusy = new Set();
 
 export function initExportPanel(el) {
   pane = el;
@@ -47,7 +49,13 @@ export function initExportPanel(el) {
 
     <div class="sec">
       <div class="sec-head">🖼️ 캐러셀 이미지 세트</div>
-      <div class="sec-note">1번 카드(대표 썸네일 + 제목·배지) + 클립별 카드(그 구간 자막)를 JPG로 만듭니다. 인스타 피드는 4:5, 클립·스토리는 9:16.</div>
+      <div class="sec-note">1번 카드(대표 썸네일 + 제목·배지) + 타임라인 전체에서 고른 <b>서로 다른 장면</b> 카드(그 시점 자막)를 JPG로 만듭니다. 같은 장면이 두 번 나오지 않습니다. 인스타 피드는 4:5, 클립·스토리는 9:16.</div>
+      <div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <label style="min-width:52px">장수</label>
+        <div class="seg-btns grow" id="carCount">
+          ${CAROUSEL_COUNTS.map((n) => `<button type="button" data-car-count="${n}">${n}장</button>`).join('')}
+        </div>
+      </div>
       <div class="seg-btns" id="carRatio" style="margin-bottom:8px">
         <button type="button" data-car-ratio="4:5">4:5 피드 (1080×1350)</button>
         <button type="button" data-car-ratio="9:16">9:16 세로 (1080×1920)</button>
@@ -100,6 +108,13 @@ export function initExportPanel(el) {
     syncCarRatio();
   });
   $('#doCarousel', pane).addEventListener('click', () => runCarousel());
+  $('#carCount', pane).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-car-count]');
+    if (!b) return;
+    state.project.export.carouselCount = Number(b.dataset.carCount) || CAROUSEL_DEFAULT_COUNT;
+    persist();
+    syncCarCount();
+  });
   $('#carGrid', pane).addEventListener('click', (e) => {
     const b = e.target.closest('[data-carsave]');
     if (!b) return;
@@ -108,10 +123,24 @@ export function initExportPanel(el) {
     downloadBlob(card.blob, carouselFileName(state.project.name, card.index + 1, carCards.ratio || '4:5'));
     emit('toast', { msg: `카드 ${card.index + 1}장을 저장했습니다.`, type: 'ok' });
   });
+  $('#carGrid', pane).addEventListener('change', (e) => {
+    const input = e.target.closest('[data-cartime]');
+    if (input) { reshotCard(Number(input.dataset.cartime), Number(input.value)); return; }
+    const txt = e.target.closest('[data-cartext]');
+    if (txt) { clearTimeout(cardTextTimers.get(Number(txt.dataset.cartext))); rerenderCardText(Number(txt.dataset.cartext), txt.value); }
+  });
+  $('#carGrid', pane).addEventListener('input', (e) => {
+    const txt = e.target.closest('[data-cartext]');
+    if (!txt) return;
+    const idx = Number(txt.dataset.cartext);
+    clearTimeout(cardTextTimers.get(idx));
+    cardTextTimers.set(idx, setTimeout(() => rerenderCardText(idx, txt.value), 420));
+  });
   $('#carSaveAll', pane).addEventListener('click', () => saveAllCards());
 
   syncRes();
   syncCarRatio();
+  syncCarCount();
   renderSpecs();
   refreshSupport();
 }
@@ -119,6 +148,15 @@ export function initExportPanel(el) {
 function syncCarRatio() {
   const cur = state.project.export.carouselRatio || '4:5';
   pane.querySelectorAll('[data-car-ratio]').forEach((b) => b.classList.toggle('on', b.dataset.carRatio === cur));
+}
+
+function syncCarCount() {
+  const cur = Number(state.project.export.carouselCount) || CAROUSEL_DEFAULT_COUNT;
+  pane.querySelectorAll('[data-car-count]').forEach((b) => b.classList.toggle('on', Number(b.dataset.carCount) === cur));
+}
+
+function carCount() {
+  return Number(state.project.export.carouselCount) || CAROUSEL_DEFAULT_COUNT;
 }
 
 function syncRes() {
@@ -170,6 +208,7 @@ function log(line) {
   if (box) box.scrollTop = box.scrollHeight;
 }
 function escapeLog(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+function escapeAttr(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 function setProgress(p, sub) {
   const bar = $('#expProgress', pane);
@@ -261,11 +300,13 @@ async function runCarousel() {
   if (bar) bar.style.width = '2%';
   if (note) note.textContent = '카드를 만드는 중…';
   const ratio = state.project.export.carouselRatio || '4:5';
+  const count = carCount();
   try {
     releaseCards(carCards);
     carCards = [];
     const res = await buildCarousel({
       ratio,
+      count,
       onProgress: (p, sub) => {
         if (bar) bar.style.width = `${Math.round(clamp(p, 0, 1) * 100)}%`;
         if (note) note.textContent = `카드 만드는 중… ${sub || ''}`;
@@ -274,8 +315,16 @@ async function runCarousel() {
     carCards = res.cards;
     carCards.ratio = res.ratio;
     renderCarGrid();
-    if (note) note.textContent = `${res.cards.length}장 완성 (${res.w}×${res.h}) — 카드를 눌러 개별 저장하거나 아래 버튼으로 모두 저장하세요.`;
-    emit('toast', { msg: `캐러셀 카드 ${res.cards.length}장을 만들었습니다.`, type: 'ok' });
+    if (note) {
+      const short = res.limited && res.notice ? ` ${res.notice}` : '';
+      note.textContent = `${res.cards.length}장 완성 (${res.w}×${res.h}, 요청 ${res.requested}장)${short} — 카드를 누르면 개별 저장, 초를 바꾸면 그 장면만 다시 찍습니다.`;
+    }
+    emit('toast', {
+      msg: res.limited
+        ? `서로 다른 장면이 ${res.cards.length}장이라 ${res.cards.length}장으로 만들었습니다.`
+        : `캐러셀 카드 ${res.cards.length}장(서로 다른 장면)을 만들었습니다.`,
+      type: res.limited ? 'warn' : 'ok',
+    });
   } catch (e) {
     console.error(e);
     if (note) note.textContent = '카드를 만들지 못했습니다: ' + (e.message || e);
@@ -299,7 +348,11 @@ function renderCarGrid() {
     return;
   }
   const ratio = carCards.ratio || '4:5';
-  grid.innerHTML = carCards.map((c) => `
+  grid.innerHTML = carCards.map((c) => {
+    const isCover = c.index === 0;
+    const total = Math.max(0, totalDuration());
+    const val = isCover ? (c.coverTitle || '') : (c.text != null ? c.text : (c.title || ''));
+    return `
     <div class="car-item" data-carindex="${c.index}">
       <div class="car-thumb ${ratio === '9:16' ? 'tall' : ''}"><img src="${c.url}" alt="카드 ${c.index + 1}" loading="lazy"></div>
       <div class="car-cap">
@@ -307,8 +360,85 @@ function renderCarGrid() {
         <span>${escapeLog(c.label || '')}</span>
         <button class="btn tiny" data-carsave="${c.index}" type="button">저장</button>
       </div>
-    </div>`).join('');
+      <input type="text" class="car-text" data-cartext="${c.index}" value="${escapeAttr(val)}"
+        placeholder="${isCover ? '제목을 입력' : '카드 자막 입력'}" maxlength="90">
+      ${isCover ? '' : `<div class="row" style="gap:4px;margin-top:3px">
+        <input type="number" class="grow" data-cartime="${c.index}" min="0" max="${total.toFixed(1)}" step="0.1" value="${(c.t || 0).toFixed(1)}" style="padding:3px 6px;font-size:11px">
+        <span style="font-size:10.5px;color:var(--muted)">초</span>
+      </div>`}
+    </div>`;
+  }).join('');
   if (saveAll) { saveAll.style.display = 'block'; saveAll.textContent = `📥 카드 ${carCards.length}장 모두 저장 (JPG)`; }
+}
+
+/** 카드 문구를 고쳤을 때 그 카드만 다시 그리고, 입력 칸 포커스는 그대로 둡니다. */
+async function rerenderCardText(index, value) {
+  if (!carCards.length) return;
+  const pos = carCards.findIndex((c) => c.index === index);
+  if (pos < 0) return;
+  if (cardBusy.has(index)) {
+    clearTimeout(cardTextTimers.get(index));
+    cardTextTimers.set(index, setTimeout(() => rerenderCardText(index, value), 300));
+    return;
+  }
+  const card = carCards[pos];
+  const ratio = carCards.ratio || '4:5';
+  cardBusy.add(index);
+  try {
+    pause();
+    const fresh = index === 0
+      ? await rebuildCoverCard({ ratio, title: value })
+      : await rebuildCarouselCard({ ratio, t: card.t, index, text: value });
+    if (card.url) { try { URL.revokeObjectURL(card.url); } catch (e) {} }
+    carCards[pos] = fresh;
+    updateCardDom(fresh);
+    const note = $('#carNote', pane);
+    if (note) note.textContent = `카드 ${index + 1} 문구를 바꿨습니다 — 저장·모두 저장하면 이 문구로 저장됩니다.`;
+  } catch (e) {
+    console.error(e);
+    emit('toast', { msg: '카드 문구 반영 실패: ' + (e.message || e), type: 'err' });
+  } finally {
+    cardBusy.delete(index);
+  }
+}
+
+function updateCardDom(card) {
+  const grid = $('#carGrid', pane);
+  if (!grid) return;
+  const item = grid.querySelector(`.car-item[data-carindex="${card.index}"]`);
+  if (!item) { renderCarGrid(); return; }
+  const img = item.querySelector('img');
+  if (img && card.url) img.src = card.url;
+  const cap = item.querySelector('.car-cap span');
+  if (cap) cap.textContent = card.label || '';
+  const input = item.querySelector('[data-cartext]');
+  if (input && document.activeElement !== input) {
+    input.value = card.index === 0 ? (card.coverTitle || '') : (card.text != null ? card.text : '');
+  }
+}
+
+async function reshotCard(index, t) {  if (carBusy || !carCards.length) return;
+  const card = carCards.find((c) => c.index === index);
+  if (!card || index === 0) return;
+  const note = $('#carNote', pane);
+  const ratio = carCards.ratio || '4:5';
+  carBusy = true;
+  try {
+    pause();
+    if (note) note.textContent = `카드 ${index + 1}을 ${Number(t).toFixed(1)}초 지점에서 다시 찍는 중…`;
+    const fresh = await rebuildCarouselCard({ ratio, t, index });
+    if (card.url) { try { URL.revokeObjectURL(card.url); } catch (e) {} }
+    carCards[carCards.findIndex((c) => c.index === index)] = fresh;
+    renderCarGrid();
+    if (note) note.textContent = `카드 ${index + 1}을 ${Number(fresh.t).toFixed(1)}초 지점으로 다시 찍었습니다.`;
+    emit('toast', { msg: `카드 ${index + 1} 시점을 ${Number(fresh.t).toFixed(1)}초로 바꿨습니다.`, type: 'ok' });
+  } catch (e) {
+    console.error(e);
+    if (note) note.textContent = '카드를 다시 찍지 못했습니다: ' + (e.message || e);
+    emit('toast', { msg: '카드 다시 찍기 실패: ' + (e.message || e), type: 'err' });
+  } finally {
+    carBusy = false;
+  }
 }
 
 async function saveAllCards() {
@@ -329,5 +459,6 @@ export function refreshExportPanel() {
   if (!pane || !state.project) return;
   syncRes();
   syncCarRatio();
+  syncCarCount();
   renderSpecs();
 }

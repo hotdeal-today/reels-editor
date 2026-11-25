@@ -257,7 +257,10 @@ function bindEvents() {
     try {
       const res = autoLayout({ design: s.design, imageDur: s.imageDur, useSfx: s.useSfx, useName: s.useName });
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
-      emit('toast', { msg: `원클릭 배치 완료 — 컷 ${res.clips}개 · 구간 ${res.segments}개 · 효과음 ${res.sfx}개 · ${res.design}`, type: 'ok' });
+      const sub = res.subtitles || {};
+      const subTxt = sub.count ? ` · 자막 ${sub.count}개(0~${res.duration}초, 가장 큰 빈 구간 ${sub.maxGap}초)` : '';
+      emit('toast', { msg: `원클릭 배치 완료 — 컷 ${res.clips}개 · 구간 ${res.segments}개${subTxt} · 효과음 ${res.sfx}개 · ${res.design}`, type: 'ok' });
+      status(`원클릭 배치 완료 — 구간 ${res.segments}개, 자막 ${sub.count || 0}개가 0~${res.duration}초를 ${sub.maxGap > 0.4 ? `(가장 큰 빈 구간 ${sub.maxGap}초)` : '빈틈없이'} 덮습니다. 자막 글자를 바꾸려면 아래 Gemini·붙여넣기를 쓰세요.`, 'ok');
     } catch (e) {
       emit('toast', { msg: e.message || '자동 배치에 실패했습니다.', type: 'err' });
     }
@@ -301,7 +304,7 @@ function bindEvents() {
       const plan = parsePlan(text);
       const res = applyPlan(plan);
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
-      status(`붙여넣기 적용 완료 — 구간 ${res.segments}개 · 효과음 ${res.sfx}개${res.title ? ` · 제목 “${res.title}”` : ''}`, 'ok');
+      status(`붙여넣기 적용 완료 — 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개${res.title ? ` · 제목 “${res.title}”` : ''}`, 'ok');
       emit('toast', { msg: `자동 채우기 완료 (구간 ${res.segments}개)`, type: 'ok' });
     } catch (e) {
       status(e.message || '적용하지 못했습니다.', 'err');
@@ -373,13 +376,14 @@ function bindEvents() {
       } else {
         model = availableModels.text || model;
       }
-      const frames = await collectFrames(8);
+      const frames = await collectFrames(12);
       if (!frames.length) throw new Error('사진·영상 프레임을 읽지 못했습니다. 파일을 다시 올려 주세요.');
-      status(`Gemini(${model})가 사진 프레임 ${frames.length}장을 보고 세팅을 만드는 중… (10~30초)`, 'warn');
+      const videos = new Set(frames.filter((f) => /^영상/.test(f.label || '')).map((f) => (f.label || '').split(' ')[1])).size;
+      status(`Gemini(${model})가 프레임 ${frames.length}장${videos ? `(영상 ${videos}개 × 2~3프레임)` : ''}을 보고 세팅을 만드는 중… (10~30초)`, 'warn');
       const { plan } = await askGemini({ apiKey: s.apiKey, model, prompt: buildPrompt($('#aiTopic', pane).value.trim()), frames });
       const res = applyPlan(plan);
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
-      status(`AI 세팅 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개 · 효과음 ${res.sfx}개`, 'ok');
+      status(`AI 세팅 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개`, 'ok');
       emit('toast', { msg: 'AI가 타임라인을 세팅했습니다.', type: 'ok' });
     } catch (e) {
       status(e.message || 'AI 세팅에 실패했습니다.', 'err');

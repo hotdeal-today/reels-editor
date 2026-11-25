@@ -1,16 +1,16 @@
 // main.js — 앱 부팅 · 탭 · 전역 이벤트
 import { $, $$, clamp, on, emit, fmtSec } from './util.js';
-import { state, loadProject, loadAssets, persist, newProject, totalDuration, activeSegment, getAsset } from './state.js';
+import { state, loadProject, loadAssets, persist, newProject, totalDuration, activeSegment, getAsset, mixDirty } from './state.js';
 import { openDB, idbClear } from './db.js';
 import { warmupBuiltinFonts, loadCustomFontsFromDB, ensureFont } from './fonts.js';
-import { initClipsPanel, addMediaFiles, refreshClips, setSelectedClip } from './panels/clips.js';
+import { initClipsPanel, addMediaFiles, refreshClips, setSelectedClip, syncMosaicControls } from './panels/clips.js';
 import { initTextPanel, refreshTextPanel, syncPositionInputs, renderStyleCard } from './panels/text.js';
 import { initAudioPanel, refreshAudioPanel, selectSfx } from './panels/audio.js';
 import { initExportPanel, refreshExportPanel } from './panels/export.js';
 import { initAiPanel, refreshAiPanel } from './panels/ai.js';
 import { initTimeline, renderTimeline, setPlayhead } from './timeline.js';
 import { initPlayer, togglePlay, play, pause, seek, requestRender, resizeCanvas, setMuted } from './player.js';
-import { hitTestText } from './render.js';
+import { hitTestText, mosaicHitInfo, mosaicRect, setMosaicDragging } from './render.js';
 import { buildMix } from './audio.js';
 
 let activeTab = 'clips';
@@ -230,11 +230,12 @@ function bindGlobalDnd() {
   });
 }
 
-// ── 캔버스 위 글자 드래그 ──────────────────────────────
+// ── 캔버스 위 글자·자막 가림 드래그 ──────────────────────
 function bindCanvasDrag() {
   const canvas = $('#preview');
   if (!canvas) return;
-  let drag = null;
+  let drag = null;      // 글자 드래그
+  let mDrag = null;     // 블러(자막 가리기) 박스 드래그
 
   const toDesign = (ev) => {
     const r = canvas.getBoundingClientRect();
@@ -248,55 +249,115 @@ function bindCanvasDrag() {
     if (!state.project.clips.length) return;
     const pt = toDesign(ev);
     const hit = hitTestText(pt.x, pt.y);
-    if (!hit) return;
-    ev.preventDefault();
-    if (state.playing) pause();
-    state.sel.text = hit.key;
-    const seg = state.project.segments.find((s) => s.id === hit.segId);
-    if (seg) state.sel.segment = seg.id;
-    const st = state.project.texts[hit.key];
-    const cur = (seg && seg.pos && seg.pos[hit.key]) || { x: st.x, y: st.y };
-    drag = { key: hit.key, segId: hit.segId, dx: pt.x - cur.x, dy: pt.y - cur.y, startX: pt.x, startY: pt.y, moved: false };
-    canvas.classList.add('is-dragging');
-    canvas.setPointerCapture(ev.pointerId);
-    if (activeTab === 'text') renderStyleCardSafe();
+    if (hit) {
+      ev.preventDefault();
+      if (state.playing) pause();
+      state.sel.text = hit.key;
+      const seg = state.project.segments.find((s) => s.id === hit.segId);
+      if (seg) state.sel.segment = seg.id;
+      const st = state.project.texts[hit.key];
+      const cur = (seg && seg.pos && seg.pos[hit.key]) || { x: st.x, y: st.y };
+      drag = { key: hit.key, segId: hit.segId, dx: pt.x - cur.x, dy: pt.y - cur.y, startX: pt.x, startY: pt.y, moved: false };
+      canvas.classList.add('is-dragging');
+      canvas.setPointerCapture(ev.pointerId);
+      if (activeTab === 'text') renderStyleCardSafe();
+      return;
+    }
+
+    // 글자가 없으면 자막 가림(블러) 박스를 집습니다.
+    const mos = mosaicHitInfo(pt.x, pt.y);
+    if (mos) {
+      ev.preventDefault();
+      if (state.playing) pause();
+      const m = mos.m;
+      const r = mosaicRect(m);
+      mDrag = {
+        target: mos.target,
+        perClip: mos.perClip,
+        w: clamp(Number(m.w != null ? m.w : 68), 1, 100),
+        h: clamp(Number(m.h != null ? m.h : 9), 1, 100),
+        dx: pt.x - (r.x + r.w / 2),
+        dy: pt.y - (r.y + r.h / 2),
+        startX: pt.x,
+        startY: pt.y,
+        moved: false,
+      };
+      setMosaicDragging(true);
+      canvas.classList.add('is-dragging', 'is-mosaic-drag');
+      canvas.setPointerCapture(ev.pointerId);
+      requestRender();
+      return;
+    }
   });
 
   canvas.addEventListener('pointermove', (ev) => {
-    if (!drag) {
+    if (!drag && !mDrag) {
       const pt = toDesign(ev);
-      const hit = hitTestText(pt.x, pt.y);
-      canvas.style.cursor = hit ? 'grab' : 'default';
+      if (hitTestText(pt.x, pt.y)) canvas.style.cursor = 'grab';
+      else if (mosaicHitInfo(pt.x, pt.y)) canvas.style.cursor = 'move';
+      else canvas.style.cursor = 'default';
       return;
     }
     const pt = toDesign(ev);
-    if (Math.abs(pt.x - drag.startX) > 2 || Math.abs(pt.y - drag.startY) > 2) drag.moved = true;
-    const st = state.project.texts[drag.key];
-    const nx = clamp(pt.x - drag.dx, 0, 1080);
-    const ny = clamp(pt.y - drag.dy, 0, 1920);
-    const seg = state.project.segments.find((s) => s.id === drag.segId);
-    if (seg) {
-      seg.pos = seg.pos || {};
-      seg.pos[drag.key] = { x: nx, y: ny };
-    } else {
-      st.x = nx; st.y = ny;
+    if (drag) {
+      if (Math.abs(pt.x - drag.startX) > 2 || Math.abs(pt.y - drag.startY) > 2) drag.moved = true;
+      const st = state.project.texts[drag.key];
+      const nx = clamp(pt.x - drag.dx, 0, 1080);
+      const ny = clamp(pt.y - drag.dy, 0, 1920);
+      const seg = state.project.segments.find((s) => s.id === drag.segId);
+      if (seg) {
+        seg.pos = seg.pos || {};
+        seg.pos[drag.key] = { x: nx, y: ny };
+      } else {
+        st.x = nx; st.y = ny;
+      }
+      requestRender();
+      return;
     }
-    requestRender();
+    if (mDrag) {
+      if (Math.abs(pt.x - mDrag.startX) > 2 || Math.abs(pt.y - mDrag.startY) > 2) mDrag.moved = true;
+      // 박스가 화면 밖으로 나가지 않게 중심값을 잘라 넣습니다.
+      const minX = mDrag.w / 2, maxX = 100 - mDrag.w / 2;
+      const minY = mDrag.h / 2, maxY = 100 - mDrag.h / 2;
+      const x = clamp(((pt.x - mDrag.dx) / 1080) * 100, minX, maxX);
+      const y = clamp(((pt.y - mDrag.dy) / 1920) * 100, minY, maxY);
+      mDrag.target.x = Math.round(x * 10) / 10;
+      mDrag.target.y = Math.round(y * 10) / 10;
+      requestRender();
+      syncMosaicControls({ x: mDrag.target.x, y: mDrag.target.y });
+    }
   });
 
   const endDrag = () => {
-    if (!drag) return;
-    const moved = drag.moved;
-    drag = null;
-    canvas.classList.remove('is-dragging');
+    if (drag) {
+      const moved = drag.moved;
+      drag = null;
+      canvas.classList.remove('is-dragging');
+      if (moved) {
+        persist();
+        if (activeTab === 'text') { syncPositionInputs(); }
+        emit('toast', { msg: '글자 위치를 옮겼습니다.' });
+      }
+      return;
+    }
+    if (!mDrag) return;
+    const moved = mDrag.moved;
+    const x = Math.round(Number(mDrag.target.x != null ? mDrag.target.x : 50));
+    const y = Math.round(Number(mDrag.target.y != null ? mDrag.target.y : 78));
+    mDrag = null;
+    setMosaicDragging(false);
+    canvas.classList.remove('is-dragging', 'is-mosaic-drag');
+    requestRender();
     if (moved) {
+      mixDirty();
       persist();
-      if (activeTab === 'text') { syncPositionInputs(); }
-      emit('toast', { msg: '글자 위치를 옮겼습니다.' });
+      emit('project', { panels: ['clips'] });
+      emit('toast', { msg: `자막 가림 위치를 옮겼습니다 — 가로 ${x}% · 세로 ${y}%`, type: 'ok' });
     }
   };
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('pointerleave', (ev) => { if (!drag && !mDrag) canvas.style.cursor = 'default'; });
 }
 
 // ── 키보드 ─────────────────────────────────────────────
@@ -362,7 +423,7 @@ function showHelp() {
       <h4>재생</h4>
       <p><kbd>Space</kbd> 재생 / 정지 · <kbd>←</kbd><kbd>→</kbd> 0.1초 이동 · <kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> 1초 이동 · <kbd>Home</kbd> 처음으로</p>
       <h4>편집</h4>
-      <p>미리보기에서 <b>글자를 끌면</b> 위치가 바뀝니다. 타임라인의 주황색 효과음 블록은 끌어서 0.05초 단위로 옮길 수 있습니다.</p>
+      <p>미리보기에서 <b>글자를 끌면</b> 위치가 바뀝니다. <b>자막 가리기(블러)</b>를 켰을 때는 미리보기의 <b>블러 박스를 직접 끌어</b> 가로·세로 위치를 옮길 수 있습니다. 타임라인의 주황색 효과음 블록은 끌어서 0.05초 단위로 옮길 수 있습니다.</p>
       <p><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>S</kbd> 즉시 저장 (자동 저장도 됩니다)</p>
       <h4>내보내기</h4>
       <p>탭 4에서 MP4로 저장합니다. 기기 성능에 따라 1~2분 걸릴 수 있고, 진행률이 표시됩니다.</p>

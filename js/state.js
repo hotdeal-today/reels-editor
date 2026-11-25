@@ -34,6 +34,7 @@ export function defaultStyle(key) {
 
 export const MOSAIC_DEFAULT = {
   on: false,
+  x: 50,        // 가림 영역 중심 X (%) — 화면 가운데(미리보기에서 끌어 옮길 수 있음)
   y: 78,        // 가림 영역 중심 Y (%) — 하단 자막 글자 줄 주변
   h: 9,         // 높이 (%) — 글자 한 줄만
   w: 68,        // 너비 (%) — 양옆 배경은 건드리지 않음
@@ -59,7 +60,7 @@ export function defaultProject() {
       { id: uid('seg'), start: 0, end: 4, title: '', badge: '', subtitle: '', pos: {} },
     ],
     audio: { narration: null, bgm: null, sfx: [], customSfx: [], voice: [] },
-    export: { width: 1080, height: 1920, fps: 30, realtime: false, bitrateMbps: 8 },
+    export: { width: 1080, height: 1920, fps: 30, realtime: false, bitrateMbps: 8, carouselRatio: '4:5', carouselCount: 5 },
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -156,6 +157,14 @@ export function ensureSegments() {
       only.start = 0;
       only.end = dur;
     }
+  }
+  // 클립 길이를 늘렸는데 자막이 예전 길이에서 끝나는 경우 → 마지막 구간을 전체 길이까지 늘립니다.
+  if (dur > 0.3 && p.segments.length) {
+    p.segments.sort((a, b) => a.start - b.start);
+    const last = p.segments[p.segments.length - 1];
+    if (last.end < dur - 0.05) last.end = dur;
+    const first = p.segments[0];
+    if (first.start > 0.05) first.start = 0;
   }
   p.segments.sort((a, b) => a.start - b.start);
 }
