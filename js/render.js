@@ -227,7 +227,7 @@ function drawClip(ctx, clip, local, alpha) {
   try { ctx.drawImage(src, dx, dy, dw, dh); } catch (e) { /* 프레임 미준비 */ }
   ctx.restore();
 
-  // 기존 자막 가리기 — 이 클립에 모자이크가 켜져 있으면 영역만 픽셀 처리
+  // 기존 자막 가리기 — 이 클립에 자막 가림이 켜져 있으면 영역만 희뿌연 블러(원하면 픽셀화) 처리
   const mosaic = mosaicOf(clip);
   if (mosaic.on) applyMosaic(ctx, mosaic, alpha);
 }
