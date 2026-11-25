@@ -192,25 +192,25 @@ export function seek(t) {
   emit('seek', nt);
 }
 
-/** 현재 위치(또는 지정 위치)의 프레임을 그립니다. 비디오는 정확한 프레임으로 이동합니다. */
+/** 현재 위치(또는 지정 위치)의 프레임을 그립니다. 텍스트는 즉시, 영상은 시크 후 한 번 더 그립니다. */
 export async function renderAt(t, opts = {}) {
   const target = t == null ? state.time : t;
+  // 1) 즉시 한 번 — 영상 프레임이 준비되지 않아도 글자·구도는 바로 보이게
+  renderFrame(ctx, target);
+
   const p = state.project;
-  if (p) {
-    const loc = locate(target);
-    if (loc && loc.clip.kind === 'video' && opts.seekMedia !== false) {
-      const v = videoFor(loc.clip.assetId);
-      if (v) {
-        const want = clamp((loc.clip.trimIn || 0) + loc.local * (loc.clip.speed || 1), 0, Math.max(0, (v.duration || 1) - 0.03));
-        const key = `${loc.clip.assetId}:${want.toFixed(2)}`;
-        if (key !== lastSeekKey) {
-          lastSeekKey = key;
-          await waitVideoReady(v, 3000);
-          await seekVideo(v, want);
-        }
-      }
-    }
-  }
+  if (!p || opts.seekMedia === false) return;
+  const loc = locate(target);
+  if (!loc || loc.clip.kind !== 'video') return;
+  const v = videoFor(loc.clip.assetId);
+  if (!v) return;
+  const want = clamp((loc.clip.trimIn || 0) + loc.local * (loc.clip.speed || 1), 0, Math.max(0, (v.duration || 1) - 0.03));
+  const key = `${loc.clip.assetId}:${want.toFixed(2)}`;
+  if (key === lastSeekKey) return;
+  lastSeekKey = key;
+  await waitVideoReady(v, 1500);
+  await seekVideo(v, want);
+  // 2) 정확한 영상 프레임으로 다시
   renderFrame(ctx, target);
 }
 

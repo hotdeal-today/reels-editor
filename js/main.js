@@ -43,6 +43,9 @@ async function boot() {
   });
   $('#emptyPick').addEventListener('click', () => $('#globalFilePicker').click());
 
+  // 디버깅용 (읽기 전용 참고): 콘솔에서 현재 상태 확인
+  window.__reels = { state, totalDuration, render: () => requestRender(), seek };
+
   refreshAll();
   // 폰트 로딩 후 한 번 더 그려 폴백 글꼴로 굳는 것을 방지
   const fonts = ['title', 'badge', 'subtitle'].map((k) => state.project.texts[k]);

@@ -138,6 +138,7 @@ export function videoFor(assetId) {
   v.playsInline = true;
   v.setAttribute('playsinline', '');
   v.addEventListener('loadeddata', () => window.dispatchEvent(new Event('media-ready')));
+  v.addEventListener('seeked', () => window.dispatchEvent(new Event('media-ready')));
   v.src = asset.url;
   v.load();
   videoEls.set(assetId, v);
@@ -183,7 +184,7 @@ export function seekVideo(v, time) {
       const finish = () => { if (settled) return; settled = true; v.removeEventListener('seeked', finish); resolve(); };
       v.addEventListener('seeked', finish);
       try { v.currentTime = target; } catch (e) { finish(); }
-      setTimeout(finish, 1200);
+      setTimeout(finish, 700);
     }
   });
 }
