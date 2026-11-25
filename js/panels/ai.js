@@ -224,7 +224,7 @@ function bindEvents() {
     if (hasText && !window.confirm('기존 구간·자막·효과음이 새로 배치됩니다(지금 쓴 글자는 사라집니다). 계속할까요?\n\n글자를 지키려면 [취소] 후 💾 .json 저장을 먼저 해 두세요.')) return;
     try {
       const res = autoLayout({ design: s.design, imageDur: s.imageDur, useSfx: s.useSfx, useName: s.useName });
-      emit('project', { panels: ['clips', 'text', 'audio'] });
+      emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       emit('toast', { msg: `원클릭 배치 완료 — 컷 ${res.clips}개 · 구간 ${res.segments}개 · 효과음 ${res.sfx}개 · ${res.design}`, type: 'ok' });
     } catch (e) {
       emit('toast', { msg: e.message || '자동 배치에 실패했습니다.', type: 'err' });
@@ -268,7 +268,7 @@ function bindEvents() {
     try {
       const plan = parsePlan(text);
       const res = applyPlan(plan);
-      emit('project', { panels: ['clips', 'text', 'audio'] });
+      emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       status(`붙여넣기 적용 완료 — 구간 ${res.segments}개 · 효과음 ${res.sfx}개${res.title ? ` · 제목 “${res.title}”` : ''}`, 'ok');
       emit('toast', { msg: `자동 채우기 완료 (구간 ${res.segments}개)`, type: 'ok' });
     } catch (e) {
@@ -346,7 +346,7 @@ function bindEvents() {
       status(`Gemini(${model})가 사진 프레임 ${frames.length}장을 보고 세팅을 만드는 중… (10~30초)`, 'warn');
       const { plan } = await askGemini({ apiKey: s.apiKey, model, prompt: buildPrompt($('#aiTopic', pane).value.trim()), frames });
       const res = applyPlan(plan);
-      emit('project', { panels: ['clips', 'text', 'audio'] });
+      emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       status(`AI 세팅 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개 · 효과음 ${res.sfx}개`, 'ok');
       emit('toast', { msg: 'AI가 타임라인을 세팅했습니다.', type: 'ok' });
     } catch (e) {
@@ -433,7 +433,7 @@ function bindEvents() {
     try {
       const text = await f.text();
       const res = loadProjectJson(text);
-      emit('project', { panels: ['clips', 'text', 'audio', 'export'] });
+      emit('project', { panels: ['clips', 'text', 'audio', 'export', 'ai'] });
       emit('toast', { msg: `불러왔습니다 — 클립 ${res.clips}개 · 구간 ${res.segments}개${res.missingMedia ? ` (사진·영상 ${res.missingMedia}개는 이 기기에 없어 제외)` : ''}`, type: res.missingMedia ? 'warn' : 'ok' });
     } catch (e) {
       emit('toast', { msg: e.message || '불러오지 못했습니다.', type: 'err' });
