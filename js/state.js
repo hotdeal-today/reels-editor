@@ -42,6 +42,31 @@ export const MOSAIC_DEFAULT = {
   blur: 11,     // 희뿌연 블러 (px)
 };
 
+// ── 다이아몬드(◆ 키프레임) 카메라 모션 ─────────────────
+// a = 클립 첫 화면(◆ 시작), b = 클립 마지막 화면(◆ 끝)
+// zoom: 확대 %, x·y: 화면 기준 이동 % (-면 왼쪽/위, +면 오른쪽/아래)
+export const KF_DEFAULT = {
+  on: false,
+  a: { zoom: 100, x: 0, y: 0 },
+  b: { zoom: 100, x: 0, y: 0 },
+  ease: true,
+};
+
+/** 클립의 키프레임 설정을 항상 완전한 모양으로 돌려줍니다(예전 저장본 호환). */
+export function kfOf(clip) {
+  const k = (clip && clip.kf) || {};
+  const num = (v, def, lo, hi) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? clamp(n, lo, hi) : def;
+  };
+  const side = (v) => ({
+    zoom: num(v && v.zoom, KF_DEFAULT.a.zoom, 100, 300),
+    x: num(v && v.x, KF_DEFAULT.a.x, -50, 50),
+    y: num(v && v.y, KF_DEFAULT.a.y, -50, 50),
+  });
+  return { on: !!k.on, ease: k.ease !== false, a: side(k.a), b: side(k.b) };
+}
+
 // 예전 기본값(배경까지 넓게 덮는 굵은 블록 모자이크) — 저장본을 새 기본값으로 옮길 때 씁니다.
 const LEGACY_MOSAIC_DEFAULT = { y: 76, h: 18, w: 100, strength: 32, blur: 4 };
 

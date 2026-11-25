@@ -16,7 +16,7 @@ import { buildMix } from './audio.js';
 let activeTab = 'clips';
 
 async function boot() {
-  warmupBuiltinFonts();
+  const fontCss = warmupBuiltinFonts();
   try { await openDB(); } catch (e) { console.warn(e); }
   await loadProject();
   await loadAssets();
@@ -50,9 +50,15 @@ async function boot() {
   window.__reels = { state, totalDuration, render: () => requestRender(), seek, mix: () => buildMix(totalDuration()) };
 
   refreshAll();
-  // 폰트 로딩 후 한 번 더 그려 폴백 글꼴로 굳는 것을 방지
+  // 웹폰트 CSS → 실제 글꼴을 받은 뒤 한 번 더 그려 폴백 글꼴로 굳는 것을 방지
   const fonts = ['title', 'badge', 'subtitle'].map((k) => state.project.texts[k]);
-  Promise.all(fonts.map((t) => ensureFont(t.font, t.weight || 800))).then(() => requestRender());
+  Promise.resolve(fontCss)
+    .then(() => Promise.all(fonts.map((t) => ensureFont(t.font, t.weight || 800))))
+    .then(() => {
+      requestRender();
+      try { refreshTextPanel(); } catch (e) { /* 패널 초기화 전이면 무시 */ }
+    })
+    .catch(() => {});
   if (document.fonts) {
     document.fonts.ready.then(() => { requestRender(); });
   }

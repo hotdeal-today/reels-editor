@@ -1,5 +1,5 @@
 // render.js — 9:16 프레임 합성 (미리보기·내보내기 공용)
-import { state, getAsset, locate, clipDur, mosaicOf } from './state.js';
+import { state, getAsset, locate, clipDur, mosaicOf, kfOf } from './state.js';
 import { videoFor, imageFor } from './media.js';
 import { clamp, hexToRgba } from './util.js';
 
@@ -264,7 +264,16 @@ function drawClip(ctx, clip, local, alpha) {
   let ox = ((clip.offsetX || 0) / 100) * DESIGN_W;
   let oy = ((clip.offsetY || 0) / 100) * DESIGN_H;
 
-  if (clip.motion === 'zoomIn') scale *= 1 + 0.09 * p;
+  // ◆ 키프레임 모션 — 켜져 있으면 시작(◆)→끝(◆) 값 사이를 부드럽게 보간합니다.
+  // 이때는 기존 모션 효과·확대·위치 값 대신 키프레임이 우선합니다(충돌 방지).
+  const kf = kfOf(clip);
+  if (kf.on) {
+    const e = kf.ease ? p * p * (3 - 2 * p) : p; // 카메라처럼 천천히 출발·도착
+    const z = kf.a.zoom + (kf.b.zoom - kf.a.zoom) * e;
+    scale = fit * (z / 100);
+    ox = ((kf.a.x + (kf.b.x - kf.a.x) * e) / 100) * DESIGN_W;
+    oy = ((kf.a.y + (kf.b.y - kf.a.y) * e) / 100) * DESIGN_H;
+  } else if (clip.motion === 'zoomIn') scale *= 1 + 0.09 * p;
   else if (clip.motion === 'zoomOut') scale *= 1.09 - 0.09 * p;
   else if (clip.motion === 'panLR') { scale *= 1.07; ox += (p - 0.5) * 0.07 * DESIGN_W; }
   else if (clip.motion === 'panRL') { scale *= 1.07; ox += (0.5 - p) * 0.07 * DESIGN_W; }

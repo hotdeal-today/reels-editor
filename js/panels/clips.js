@@ -1,6 +1,6 @@
 // panels/clips.js — 탭1: 컷 편집
 import { $, $$, clamp, emit, fmtSec, escapeHtml } from '../util.js';
-import { state, getAsset, clipDur, totalDuration, persist, ensureSegments, mixDirty, mosaicOf } from '../state.js';
+import { state, getAsset, clipDur, totalDuration, persist, ensureSegments, mixDirty, mosaicOf, kfOf, KF_DEFAULT } from '../state.js';
 import { importMediaFile } from '../media.js';
 import { seek, requestRender } from '../player.js';
 import { forgetAsset, isAssetUsed } from '../assets.js';
@@ -14,6 +14,17 @@ let picker = null;
 let replacePicker = null;
 let replaceIndex = -1;
 let mosaicTarget = 'global'; // 'global' | 'clip'
+let kfSide = 'a';           // 'a' = ◆ 시작, 'b' = ◆ 끝
+
+// ◆ 키프레임 원클릭 프리셋 — 확대 125%면 이동 여백이 생겨 빈 곳이 보이지 않습니다.
+const KF_PRESETS = {
+  lr: { label: '← 왼쪽→오른쪽 훑기', a: { zoom: 125, x: -12, y: 0 }, b: { zoom: 125, x: 12, y: 0 } },
+  rl: { label: '→ 오른쪽→왼쪽 훑기', a: { zoom: 125, x: 12, y: 0 }, b: { zoom: 125, x: -12, y: 0 } },
+  tb: { label: '↓ 위→아래 훑기', a: { zoom: 125, x: 0, y: -12 }, b: { zoom: 125, x: 0, y: 12 } },
+  bt: { label: '↑ 아래→위 훑기', a: { zoom: 125, x: 0, y: 12 }, b: { zoom: 125, x: 0, y: -12 } },
+  zin: { label: '🔍 천천히 확대', a: { zoom: 100, x: 0, y: 0 }, b: { zoom: 125, x: 0, y: 0 } },
+  zout: { label: '🔎 천천히 축소', a: { zoom: 125, x: 0, y: 0 }, b: { zoom: 100, x: 0, y: 0 } },
+};
 
 export function initClipsPanel(el) {
   pane = el;
@@ -84,6 +95,9 @@ export function initClipsPanel(el) {
 
   detailEl.addEventListener('input', onDetailInput);
   detailEl.addEventListener('change', onDetailInput);
+  detailEl.addEventListener('input', onKfInput);
+  detailEl.addEventListener('change', onKfInput);
+  detailEl.addEventListener('click', onKfClick);
   const fitBox = $('#fitTargets', pane);
   fitBox.addEventListener('click', (e) => {
     const b = e.target.closest('[data-fit]');
@@ -422,7 +436,7 @@ export function renderList() {
     const thumb = asset && asset.thumb ? asset.thumb : '';
     const kindLabel = c.kind === 'video' ? '영상' : '사진';
     const speedTxt = c.kind === 'video' && c.speed !== 1 ? ` · ${c.speed}x` : '';
-    const motion = { none: '', zoomIn: ' · 줌인', zoomOut: ' · 줌아웃', panLR: ' · 패닝', panRL: ' · 패닝↔' }[c.motion] || '';
+    const motion = kfOf(c).on ? ' · ◆키프레임' : ({ none: '', zoomIn: ' · 줌인', zoomOut: ' · 줌아웃', panLR: ' · 패닝', panRL: ' · 패닝↔' }[c.motion] || '');
     return `<div class="clip-item${state.sel.clip === i ? ' sel' : ''}" data-index="${i}" draggable="true">
       <span class="clip-idx">${i + 1}</span>
       <div class="clip-thumb">${thumb ? `<img src="${thumb}" alt="">` : ''}<span class="kind">${kindLabel}</span></div>
@@ -441,12 +455,158 @@ export function renderList() {
   }).join('');
 }
 
-function rowSlider(label, field, value, min, max, step, unit, extra = '') {
+function rowSlider(label, field, value, min, max, step, unit, extra = '', dis = '') {
   return `<div class="row">
     <label>${label}</label>
-    <input type="range" class="grow" data-field="${field}" min="${min}" max="${max}" step="${step}" value="${value}">
+    <input type="range" class="grow" data-field="${field}" min="${min}" max="${max}" step="${step}" value="${value}"${dis}>
     <span class="val" data-val="${field}">${value}${unit}</span>${extra}
   </div>`;
+}
+
+// ── ◆ 키프레임 모션 카드 ─────────────────────────────
+function kfSlider(label, field, value, min, max, unit) {
+  return `<div class="row">
+    <label>${label}</label>
+    <input type="range" class="grow" data-kfnum="${field}" min="${min}" max="${max}" step="1" value="${value}">
+    <span class="val" data-kfval="${field}">${value}${unit}</span>
+  </div>`;
+}
+
+function kfCard(clip, kf) {
+  const side = kfSide === 'b' ? kf.b : kf.a;
+  const presets = Object.entries(KF_PRESETS).map(([id, p]) =>
+    `<button class="btn tiny ghost" type="button" data-kfact="preset" data-kfp="${id}">${p.label}</button>`).join('');
+  return `
+      <div class="kf-box${kf.on ? ' on' : ''}">
+        <div class="row" style="gap:8px">
+          <label class="switch"><input type="checkbox" data-kf="on" ${kf.on ? 'checked' : ''}> ◆ 키프레임 모션 켜기</label>
+          <span class="grow"></span>
+          <label class="switch" title="천천히 출발하고 천천히 멈춥니다"><input type="checkbox" data-kf="ease" ${kf.ease ? 'checked' : ''}> 부드럽게</label>
+        </div>
+        <div class="kf-presets">${presets}</div>
+        <div class="seg-btns" style="margin-top:7px">
+          <button type="button" data-kfside="a" class="${kfSide === 'a' ? 'on' : ''}">◆ 시작 화면</button>
+          <button type="button" data-kfside="b" class="${kfSide === 'b' ? 'on' : ''}">◆ 끝 화면</button>
+        </div>
+        <div style="margin-top:7px">
+          ${kfSlider('확대', 'zoom', Math.round(side.zoom), 100, 300, '%')}
+          ${kfSlider('가로 X', 'x', Math.round(side.x), -50, 50, '%')}
+          ${kfSlider('세로 Y', 'y', Math.round(side.y), -50, 50, '%')}
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:4px;margin-top:2px">
+          <button class="btn tiny ghost" type="button" data-kfact="viewA">시작 보기</button>
+          <button class="btn tiny ghost" type="button" data-kfact="viewB">끝 보기</button>
+          <button class="btn tiny ghost" type="button" data-kfact="toAll">모든 클립에</button>
+          <button class="btn tiny ghost" type="button" data-kfact="reset">초기화</button>
+        </div>
+        <div class="sec-note" style="margin:7px 0 0">
+          <b>◆ 시작 화면</b>과 <b>◆ 끝 화면</b> 값을 다르게 두면 재생할 때 그 사이를 카메라처럼 부드럽게 이동합니다.
+          프리셋은 이동 여백이 생기도록 <b>확대 125%</b>로 맞춰 두어 빈 곳이 보이지 않습니다.
+          켜져 있는 동안은 위 <b>모션 효과·확대·위치</b> 대신 이 값이 쓰입니다.
+        </div>
+      </div>`;
+}
+
+function seekToKfSide(side) {
+  const clip = currentClip();
+  if (!clip) return;
+  const start = clipStartSafe(state.sel.clip);
+  const d = clipDur(clip);
+  seek(side === 'b' ? Math.max(start, start + d - 0.05) : start);
+  requestRender();
+}
+
+function applyKf(clip, next) {
+  clip.kf = next;
+  mixDirty();
+  persist();
+  emit('project', { panels: [], select: false });
+  requestRender();
+}
+
+function onKfInput(e) {
+  if (!detailEl || !detailEl.contains(e.target)) return;
+  const clip = currentClip();
+  if (!clip) return;
+  const t = e.target;
+  if (t.dataset.kf === 'on') {
+    const kf = kfOf(clip);
+    kf.on = !!t.checked;
+    applyKf(clip, kf);
+    if (kf.on) { kfSide = 'a'; seekToKfSide('a'); }
+    renderDetail();
+    emit('toast', { msg: kf.on ? '◆ 키프레임 모션을 켰습니다. 시작·끝 화면을 다르게 맞춰 보세요.' : '◆ 키프레임 모션을 껐습니다.', type: kf.on ? 'ok' : undefined });
+    return;
+  }
+  if (t.dataset.kf === 'ease') {
+    const kf = kfOf(clip);
+    kf.ease = !!t.checked;
+    applyKf(clip, kf);
+    return;
+  }
+  const field = t.dataset.kfnum;
+  if (!field) return;
+  const side = kfSide === 'b' ? 'b' : 'a';
+  const v = field === 'zoom' ? clamp(Number(t.value), 100, 300) : clamp(Number(t.value), -50, 50);
+  const kf = kfOf(clip);
+  kf[side][field] = v;
+  applyKf(clip, kf);
+  const label = detailEl.querySelector(`[data-kfval="${field}"]`);
+  if (label) label.textContent = `${v}%`;
+}
+
+function onKfClick(e) {
+  if (!detailEl || !detailEl.contains(e.target)) return;
+  const sideBtn = e.target.closest('[data-kfside]');
+  if (sideBtn) {
+    kfSide = sideBtn.dataset.kfside === 'b' ? 'b' : 'a';
+    renderDetail();
+    seekToKfSide(kfSide);
+    return;
+  }
+  const btn = e.target.closest('[data-kfact]');
+  if (!btn) return;
+  const clip = currentClip();
+  if (!clip) return;
+  const act = btn.dataset.kfact;
+  if (act === 'preset') {
+    const preset = KF_PRESETS[btn.dataset.kfp];
+    if (!preset) return;
+    const kf = kfOf(clip);
+    kf.on = true;
+    kf.ease = true;
+    kf.a = { ...preset.a };
+    kf.b = { ...preset.b };
+    kfSide = 'a';
+    applyKf(clip, kf);
+    renderDetail();
+    seekToKfSide('a');
+    emit('toast', { msg: `${preset.label} 키프레임을 적용했습니다. ▶ 로 재생해 확인하세요.`, type: 'ok' });
+    return;
+  }
+  if (act === 'viewA' || act === 'viewB') {
+    kfSide = act === 'viewB' ? 'b' : 'a';
+    renderDetail();
+    seekToKfSide(kfSide);
+    return;
+  }
+  if (act === 'toAll') {
+    const copy = JSON.parse(JSON.stringify(kfOf(clip)));
+    const i = state.sel.clip;
+    state.project.clips.forEach((c, k) => { if (k !== i) c.kf = JSON.parse(JSON.stringify(copy)); });
+    mixDirty();
+    persist();
+    emit('project', { panels: [], select: false });
+    requestRender();
+    emit('toast', { msg: `${state.project.clips.length}개 클립에 같은 키프레임 모션을 적용했습니다.`, type: 'ok' });
+    return;
+  }
+  if (act === 'reset') {
+    kfSide = 'a';
+    applyKf(clip, { on: false, ease: true, a: { ...KF_DEFAULT.a }, b: { ...KF_DEFAULT.b } });
+    renderDetail();
+    emit('toast', { msg: '이 클립의 키프레임 모션을 초기화했습니다.' });
+  }
 }
 
 export function renderDetail() {
@@ -456,6 +616,7 @@ export function renderDetail() {
     detailEl.innerHTML = `<div class="card" style="color:var(--muted);font-size:11px">클립을 선택하면 세부 설정이 나타납니다.</div>`;
     return;
   }
+  const kf = kfOf(clip);
   const asset = getAsset(clip.assetId);
   const isVideo = clip.kind === 'video';
   const maxT = isVideo ? Math.max(0.2, clip.srcDuration || (asset && asset.duration) || 1) : 0;
@@ -501,11 +662,12 @@ export function renderDetail() {
       `}
       <div class="row">
         <label>모션 효과</label>
-        <select class="grow" data-field="motion">
+        <select class="grow" data-field="motion" ${kf.on ? 'disabled title="◆ 키프레임 모션이 켜져 있어 키프레임이 우선합니다"' : ''}>
           ${[['none', '없음'], ['zoomIn', '부드러운 줌인'], ['zoomOut', '줌아웃'], ['panLR', '좌→우 패닝'], ['panRL', '우→좌 패닝']]
             .map(([v, l]) => `<option value="${v}"${clip.motion === v ? ' selected' : ''}>${l}</option>`).join('')}
         </select>
       </div>
+      ${kfCard(clip, kf)}
       <div class="row">
         <label>컷 전환</label>
         <select class="grow" data-field="transition">
@@ -520,15 +682,16 @@ export function renderDetail() {
           <option value="fit"${clip.fit === 'fit' ? ' selected' : ''}>전체 맞춤 (Fit)</option>
         </select>
       </div>
-      ${rowSlider('확대', 'zoom', clip.zoom ?? 100, 100, 250, 1, '%')}
+      ${rowSlider('확대', 'zoom', clip.zoom ?? 100, 100, 250, 1, '%', '', kf.on ? ' disabled' : '')}
       <div class="row">
         <label>위치</label>
         <span style="font-size:10.5px;color:var(--muted)">X</span>
-        <input type="number" data-field="offsetX" value="${clip.offsetX || 0}" min="-50" max="50" step="1" style="width:56px">
+        <input type="number" data-field="offsetX" value="${clip.offsetX || 0}" min="-50" max="50" step="1" style="width:56px"${kf.on ? ' disabled' : ''}>
         <span style="font-size:10.5px;color:var(--muted)">Y</span>
-        <input type="number" data-field="offsetY" value="${clip.offsetY || 0}" min="-50" max="50" step="1" style="width:56px">
+        <input type="number" data-field="offsetY" value="${clip.offsetY || 0}" min="-50" max="50" step="1" style="width:56px"${kf.on ? ' disabled' : ''}>
         <span class="val">%</span>
       </div>
+      ${kf.on ? '<div class="sec-note" style="margin:0 0 8px">◆ 키프레임 모션이 켜져 있어 확대·위치 값은 쓰이지 않습니다(끄면 다시 적용).</div>' : ''}
       <div class="sec-head" style="margin:10px 0 6px">기본 색감</div>
       ${rowSlider('밝기', 'brightness', clip.adjust?.brightness || 0, -50, 50, 1, '')}
       ${rowSlider('대비', 'contrast', clip.adjust?.contrast || 0, -50, 50, 1, '')}

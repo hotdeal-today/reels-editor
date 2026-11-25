@@ -1,7 +1,7 @@
 // panels/text.js — 탭2: 제목 · 배지 · 자막
 import { $, $$, clamp, emit, uid, escapeHtml, isFontFile } from '../util.js';
 import { state, TEXT_KEYS, TEXT_LABEL, defaultStyle, totalDuration, activeSegment, persist, mixDirty } from '../state.js';
-import { fontOptionsHtml, allFonts, addCustomFont, ensureFont } from '../fonts.js';
+import { fontOptionsHtml, allFonts, addCustomFont, ensureFont, fontInfo } from '../fonts.js';
 import { seek } from '../player.js';
 import { PALETTE, PRESETS } from '../presets.js';
 
@@ -24,7 +24,10 @@ export function initTextPanel(el) {
       <input id="fontPicker" type="file" accept=".ttf,.otf,.woff,.woff2" hidden>
       <div class="font-grid" id="fontBox"></div>
       <button class="btn sm block" id="applyAllFonts" type="button" style="margin-top:7px">세 곳 모두 같은 폰트로 통일</button>
-      <div class="sec-note" style="margin-top:7px">내장 7종 + 직접 올린 폰트. 올린 폰트는 이 브라우저(IndexedDB)에 저장됩니다.</div>
+      <div class="sec-note" style="margin-top:7px">
+        <b>내장 24종</b> — 한글 16종(Jua·Dongle·Gamja Flower·Gaegu·Single Day 등) · 영문 8종(Pacifico·Dancing Script·Caveat 등).
+        <b>+ 내 폰트 추가</b>로 직접 가진 <b>.ttf · .otf · .woff2</b>도 올릴 수 있습니다(이 브라우저 IndexedDB에만 저장).
+      </div>
     </div>
 
     <div class="sec">
@@ -84,8 +87,12 @@ export function initTextPanel(el) {
   fontBox.addEventListener('change', (e) => {
     const key = e.target.dataset.font;
     if (!key) return;
-    state.project.texts[key].font = e.target.value;
-    ensureFont(e.target.value, 800).then(() => afterEdit([]));
+    const family = e.target.value;
+    state.project.texts[key].font = family;
+    // 고른 그 줄의 미리보기만 바꿔 끼웁니다(선택 상자를 다시 그려 드롭다운이 닫히지 않게)
+    const row = e.target.closest('.font-row');
+    if (row) paintFontPreview(row, family);
+    $('#applyAllFonts', pane) && ensureFont(family, 800).then(() => afterEdit([]));
   });
 
   $('#textTabs', pane).addEventListener('click', (e) => {
@@ -136,13 +143,35 @@ function afterEdit(panels) {
   persist();
 }
 
+function sampleFor(family) {
+  const f = fontInfo(family);
+  if (f && f.group === 'en') return { ko: '한글은 기본 고딕', en: 'Handwriting Aa' };
+  return { ko: '가나다 한글 Aa', en: '가나다라 · Aa Bb 123' };
+}
+
+function paintFontPreview(row, family) {
+  const pv = row.querySelector('.font-preview');
+  if (!pv) return;
+  const s = sampleFor(family);
+  pv.style.fontFamily = `"${family}", "Noto Sans KR", sans-serif`;
+  pv.innerHTML = `<span>${s.ko}</span><span class="en">${s.en}</span>`;
+}
+
+
 function renderFonts() {
   if (!fontBox) return;
-  fontBox.innerHTML = TEXT_KEYS.map((k) => `
+  fontBox.innerHTML = TEXT_KEYS.map((k) => {
+    const family = state.project.texts[k].font;
+    const s = sampleFor(family);
+    return `
     <div class="font-row">
       <label>${TEXT_LABEL[k]}</label>
-      <select data-font="${k}">${fontOptionsHtml(state.project.texts[k].font)}</select>
-    </div>`).join('');
+      <select data-font="${k}">${fontOptionsHtml(family)}</select>
+      <div class="font-preview" style="font-family:'${family}', 'Noto Sans KR', sans-serif;" title="이 글꼴로 글자가 이렇게 나옵니다"><span>${s.ko}</span><span class="en">${s.en}</span></div>
+    </div>`;
+  }).join('');
+  // 미리보기 글꼴이 아직 안 받아졌으면 받은 뒤 그 글꼴로 다시 그립니다.
+  Promise.all(TEXT_KEYS.map((k) => ensureFont(state.project.texts[k].font, 800))).catch(() => {});
 }
 
 export function refreshFontOptions() { renderFonts(); }

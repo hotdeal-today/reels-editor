@@ -20,6 +20,8 @@ export const DEFAULT_AI_SETTINGS = {
   imageDur: 2.6,
   useSfx: true,
   useName: true,
+  // 원클릭·붙여넣기·Gemini 세팅 뒤 자막과 1:1로 나레이션(TTS)까지 만들지
+  ttsAuto: true,
 };
 
 export function loadAiSettings() {
@@ -431,6 +433,30 @@ export async function askGemini({ apiKey, model, prompt, frames = [], temperatur
 function clean(s) {
   return String(s == null ? '' : s).replace(/\s+/g, ' ').replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
 }
+
+// ── 제목·배지가 비지 않게 ─────────────────────────────
+// 프로젝트 이름이 '새 릴스'이거나 비어 있어도 제목·배지가 반드시 채워지도록,
+// ① 프로젝트 이름 → ② '주제' 입력값 → ③ 기본 제목 순서로 정합니다.
+export const DEFAULT_TITLE = '오늘의 추천 릴스';
+const PLACEHOLDER_NAMES = ['', '새 릴스', '새 프로젝트', '제목 없음', '새 영상', '새 숏폼'];
+
+export function isPlaceholderName(name) {
+  return PLACEHOLDER_NAMES.includes(clean(name));
+}
+
+export function resolveHeadline(settings = {}, projectName = '') {
+  const s = settings || {};
+  const name = clean(projectName);
+  const topic = clean(s.topic);
+  let title = '';
+  if (!isPlaceholderName(name) && s.useName !== false) title = name;
+  else if (topic) title = topic;
+  else title = DEFAULT_TITLE;
+  title = title.replace(/\s+/g, ' ').slice(0, 40);
+  // 배지 — 제목·주제에 팁/할인 냄새가 나면 '꿀팁', 아니면 'BEST'
+  const badge = /꿀팁|팁|정보|노하우|가성비|할인|특가|세일|비교/.test(`${title} ${topic}`) ? '꿀팁' : 'BEST';
+  return { title, badge, fromName: title === name && !isPlaceholderName(name), hasTopic: !!topic };
+}
 function num(v) {
   if (typeof v === 'number') return v;
   const m = String(v == null ? '' : v).replace(',', '.').match(/-?\d+(?:\.\d+)?/);
@@ -593,13 +619,14 @@ export function autoLayout(opts = {}) {
   const beats = beatCountFor(dur);
   const step = dur / Math.max(1, beats);
   const name = clean(p.name);
-  const titleName = s.useName === false ? '' : (name && name !== '새 릴스' ? name : '');
+  const head = resolveHeadline(s, name);
+  const titleName = head.title;
   const topic = clean(s.topic);
   const hookText = '자세한 내용은 본문에서 확인하세요👇';
 
   // 자막에 쓸 수 있는 내 레이블 글(프로젝트 이름·주제) — 없는 내용을 지어내지 않습니다.
   const seed = [];
-  if (titleName || (name && name !== '새 릴스')) seed.push(name);
+  if (!isPlaceholderName(name)) seed.push(name);
   if (topic && topic !== name) seed.push(topic);
   seed.push(hookText);
 
@@ -611,7 +638,7 @@ export function autoLayout(opts = {}) {
   }));
   // 첫 칸은 제목, 마지막 칸은 후킹 멘트로 시작하고, 나머지는 위 글을 순서대로 나눠 채웁니다.
   segsBuild[0].title = titleName;
-  segsBuild[0].badge = titleName ? 'BEST' : '';
+  segsBuild[0].badge = head.badge;
   const slots = segsBuild.length;
   if (slots === 1) {
     segsBuild[0].subtitle = (seed[0] || hookText).slice(0, 24);
@@ -648,6 +675,8 @@ export function autoLayout(opts = {}) {
     sfx: (p.audio.sfx || []).length,
     design: (DESIGN_SETS[s.design] || DESIGN_SETS.neon).label,
     duration: round(dur, 1),
+    title: p.segments[0] ? p.segments[0].title : '',
+    badge: p.segments[0] ? p.segments[0].badge : '',
     subtitles: subtitleStats(p.segments, totalDuration()),
   };
 }
@@ -706,9 +735,12 @@ export function applyPlan(plan, opts = {}) {
   segs[0].start = 0;
   segs[segs.length - 1].end = round(dur, 2);
 
-  // 2) 제목·배지
+  // 2) 제목·배지 — AI가 안 줬거나 비어 있으면 프로젝트 이름·주제·기본값으로 반드시 채웁니다.
+  const head = resolveHeadline(loadAiSettings());
   if (plan.title) segs[0].title = plan.title;
   if (plan.badge) segs[0].badge = plan.badge;
+  if (!String(segs[0].title || '').trim()) segs[0].title = head.title;
+  if (!String(segs[0].badge || '').trim()) segs[0].badge = head.badge;
 
   // 3) 마지막 후킹 멘트 — 기존 자막을 지우지 않고 자리를 만들어 넣습니다.
   if (plan.hook) {

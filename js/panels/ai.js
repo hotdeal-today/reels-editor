@@ -15,6 +15,7 @@ import {
   geminiTts, addVoiceClip, removeVoiceClip, voiceClips, previewSpeech, stopSpeech,
   localVoices, speechSupported, recordVoice, voiceAssetName,
 } from '../tts.js';
+import { forgetAsset } from '../assets.js';
 import { buildProjectJson, loadProjectJson, projectFileName } from '../project-io.js';
 import { seek } from '../player.js';
 
@@ -30,7 +31,7 @@ export function initAiPanel(el) {
   const local = localVoices();
 
   pane.innerHTML = `
-    <div class="ai-hero">
+    <div class="ai-hero" id="aiHero">
       <b>✨ AI 자동 세팅</b>
       <p>사진·영상을 올린 뒤 한 번만 누르면 <b>컷·모션·전환·디자인·효과음·마지막 멘트</b>가 자동으로 배치됩니다.
       아래 <b>무료 원클릭</b>은 키가 필요 없고, <b>Gemini</b>는 무료 API 키를 넣으면 사진을 읽고 제목·자막까지 만들어 줍니다.</p>
@@ -63,7 +64,7 @@ export function initAiPanel(el) {
       </div>
     </div>
 
-    <div class="sec">
+    <div class="sec" data-sec="oneclick">
       <div class="sec-head">⚡ 무료 원클릭 (키 필요 없음)</div>
       <div class="card ai-card">
         <div class="row">
@@ -88,11 +89,11 @@ export function initAiPanel(el) {
           <label class="switch"><input type="checkbox" id="aiUseName"> 제목에 프로젝트 이름</label>
         </div>
         <button class="btn primary block ai-big" id="aiOneClick" type="button">⚡ 원클릭 자동 배치</button>
-        <div class="sec-note" style="margin:6px 0 0">지금 타임라인의 구간·효과음을 새로 배치합니다. 자막 글자는 유지되지 않으니, 글자를 이미 썼다면 먼저 <b>💾 프로젝트 저장</b>을 해 두세요.</div>
+        <div class="sec-note" id="aiOneClickNote" style="margin:6px 0 0">지금 타임라인의 구간·효과음을 새로 배치합니다. 자막 글자는 유지되지 않으니, 글자를 이미 썼다면 먼저 <b>💾 프로젝트 저장</b>을 해 두세요.</div>
       </div>
     </div>
 
-    <div class="sec">
+    <div class="sec" data-sec="prompt">
       <div class="sec-head">📋 무료 ChatGPT · Gemini 채팅용 <span class="count">키 없이</span></div>
       <div class="card ai-card">
         <div class="sec-note" style="margin:0 0 7px">① 프롬프트를 복사해 무료 ChatGPT/Gemini 채팅창에 <b>사진과 함께</b> 붙여넣고, ② 받은 JSON을 아래에 붙여넣으세요.</div>
@@ -106,7 +107,7 @@ export function initAiPanel(el) {
       </div>
     </div>
 
-    <div class="sec">
+    <div class="sec" data-sec="gemini">
       <div class="sec-head">✨ Gemini로 자동 세팅 <span class="count">무료 키</span></div>
       <div class="card ai-card">
         <div class="row">
@@ -123,6 +124,11 @@ export function initAiPanel(el) {
           <label>주제</label>
           <input type="text" class="grow" id="aiTopic" placeholder="예: 오사카 3박4일 총정리 (선택)" maxlength="80">
         </div>
+        <div class="row" style="gap:8px">
+          <label class="switch"><input type="checkbox" id="aiAutoTts" checked> 🎙 나레이션까지 자동 생성</label>
+          <span class="grow"></span>
+          <span class="ai-key-state" id="aiAutoTtsNote" style="font-size:10px"></span>
+        </div>
         <div class="row">
           <label>모델</label>
           <span class="ai-model grow" id="aiModelInfo">연결 확인을 누르면 모델을 확인합니다</span>
@@ -130,6 +136,7 @@ export function initAiPanel(el) {
         <button class="btn primary block ai-big" id="aiGenerate" type="button">✨ AI로 제목·자막·효과음 세팅</button>
         <div class="sec-note" style="margin:6px 0 0">
           키는 이 브라우저(localStorage)에만 저장되고 서버로 보내지 않습니다. 사진·영상 프레임은 Gemini에 전송됩니다(무료 한도 내).
+          나레이션까지 켜 두면 자막과 <b>1:1 같은 글·같은 시간</b>으로 Gemini TTS를 만들어 영상에 섞습니다(구간당 2~5초 걸립니다).
           <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">무료 키 발급</a>
         </div>
         <div class="ai-status hidden" id="aiStatus"></div>
@@ -187,6 +194,7 @@ export function initAiPanel(el) {
   $('#aiUseName', pane).checked = s.useName !== false;
   $('#aiTopic', pane).value = s.topic || '';
   $('#ttsVoice', pane).value = s.voice || 'Kore';
+  if ($('#aiAutoTts', pane)) $('#aiAutoTts', pane).checked = s.ttsAuto !== false;
 
   bindEvents();
   initCaptions();
@@ -215,7 +223,47 @@ function saveSettingsFromUI() {
     useName: $('#aiUseName', pane).checked,
     topic: $('#aiTopic', pane).value.trim(),
     voice: $('#ttsVoice', pane).value,
+    ttsAuto: $('#aiAutoTts', pane) ? $('#aiAutoTts', pane).checked : true,
   });
+}
+
+/**
+ * Gemini 키가 저장되어 있으면 '✨ Gemini로 자동 세팅' 카드를 원클릭보다 위로 올려
+ * 키 없는 원클릭을 헷갈려 누르는 일이 없게 합니다.
+ */
+let keyOrdered = null;
+function orderSectionsFor(keyReady) {
+  const gemini = pane.querySelector('[data-sec="gemini"]');
+  const oneclick = pane.querySelector('[data-sec="oneclick"]');
+  const prompt = pane.querySelector('[data-sec="prompt"]');
+  if (!gemini || !oneclick) return;
+  gemini.classList.toggle('ai-priority', !!keyReady);
+  oneclick.classList.toggle('ai-secondary', !!keyReady);
+  if (keyOrdered === !!keyReady) return;
+  keyOrdered = !!keyReady;
+  if (keyReady) {
+    // ✨ Gemini 카드를 히어로 바로 아래(맨 위)로
+    const first = Array.from(pane.querySelectorAll('.sec')).find((s) => s !== gemini);
+    if (first) pane.insertBefore(gemini, first);
+  } else if (prompt && prompt.parentNode === gemini.parentNode) {
+    prompt.parentNode.insertBefore(gemini, prompt.nextSibling);
+  }
+  const hero = $('#aiHero', pane);
+  if (hero) {
+    hero.innerHTML = keyReady
+      ? `<b>✨ AI 자동 세팅</b>
+         <p><b class="ai-hero-key">Gemini 키가 연결돼 있습니다.</b> 사진을 읽고 제목·자막·나레이션까지 만들어 주는 <b>✨ Gemini로 자동 세팅</b>을 먼저 쓰세요.
+         키 없이 빠르게 컷만 배치하려면 <b>⚡ 무료 원클릭</b>을 쓰면 됩니다(아래로 내려가 있습니다).</p>`
+      : `<b>✨ AI 자동 세팅</b>
+         <p>사진·영상을 올린 뒤 한 번만 누르면 <b>컷·모션·전환·디자인·효과음·마지막 멘트</b>가 자동으로 배치됩니다.
+         아래 <b>무료 원클릭</b>은 키가 필요 없고, <b>Gemini</b>는 무료 API 키를 넣으면 사진을 읽고 제목·자막까지 만들어 줍니다.</p>`;
+  }
+  const note = $('#aiOneClickNote', pane);
+  if (note) {
+    note.innerHTML = keyReady
+      ? '키 없이 쓰는 기본 배치입니다. <b>Gemini 키가 있으니 위 ✨ Gemini로 자동 세팅을 먼저 쓰세요.</b> 그래도 컷만 빠르게 잡고 싶을 때 이 버튼을 씁니다.'
+      : '지금 타임라인의 구간·효과음을 새로 배치합니다. 자막 글자는 유지되지 않으니, 글자를 이미 썼다면 먼저 <b>💾 프로젝트 저장</b>을 해 두세요.';
+  }
 }
 
 function renderKeyState() {
@@ -239,17 +287,123 @@ function renderKeyState() {
   }
   const keyInput = $('#aiKeyInput', pane);
   if (keyInput && !keyInput.value) keyInput.placeholder = s.apiKey ? `저장된 키 ${maskKey(s.apiKey)} — 바꾸려면 새 키 입력` : 'AIza… (aistudio.google.com/apikey)';
+  // 키가 있으면 Gemini 카드를 맨 위로 올리고 강조
+  orderSectionsFor(keyReady());
+  const autoTts = $('#aiAutoTts', pane);
+  if (autoTts) autoTts.disabled = !keyReady();
+  const autoNote = $('#aiAutoTtsNote', pane);
+  if (autoNote) autoNote.textContent = keyReady() ? '자막과 1:1로 나레이션 생성' : '키를 넣으면 켜집니다';
+}
+
+/** 키가 저장돼 있으면 Gemini 기능을 '준비됨'으로 봅니다. */
+function keyReady() {
+  return !!loadAiSettings().apiKey;
+}
+
+// ── 자막 ↔ 나레이션 동기화 ─────────────────────────────
+function narrationText(sg) {
+  return String((sg && (sg.subtitle || sg.title || sg.badge)) || '').trim();
+}
+
+/**
+ * 자막(segments)이 새로 만들어지면 옛 나레이션을 먼저 비웁니다.
+ *  · 구간(segId)에 묶인 옛 음성은 새 구간에 없으면 지웁니다
+ *    (4초 나레이션이 13초 자막과 따로 놀던 문제).
+ *  · all=true면 구간이 안 묶인 나레이션까지 모두 비웁니다.
+ */
+function purgeOldNarration({ all = false } = {}) {
+  const segIds = new Set((state.project.segments || []).map((s) => s.id));
+  const drop = voiceClips().slice().filter((v) => all || (v.segId && !segIds.has(v.segId)));
+  for (const v of drop) {
+    removeVoiceClip(v.id);
+    const aid = v.assetId;
+    const stillUsed = voiceClips().some((x) => x.assetId === aid)
+      || (state.project.audio.narration && state.project.audio.narration.assetId === aid)
+      || (state.project.audio.bgm && state.project.audio.bgm.assetId === aid);
+    if (aid && !stillUsed) forgetAsset(aid).catch(() => {});
+  }
+  return drop.length;
+}
+
+/** 자막 각각과 1:1(같은 글·같은 시작 시간)로 나레이션을 만듭니다. */
+async function narrateSegments() {
+  const s = loadAiSettings();
+  if (!s.apiKey) return { ok: 0, fail: 0, skipped: 'key' };
+  const segs = (state.project.segments || []).filter((sg) => narrationText(sg));
+  if (!segs.length) return { ok: 0, fail: 0, skipped: 'empty' };
+  let model = (availableModels && availableModels.tts) || s.ttsModel;
+  if (!availableModels) {
+    try {
+      const ids = await listModels(s.apiKey);
+      const picked = pickModels(ids, s);
+      availableModels = picked;
+      model = picked.tts || TTS_MODEL_CANDIDATES[0];
+      saveAiSettings({ model: picked.text || s.model, ttsModel: model });
+    } catch (e) { /* 기본 모델로 시도 */ }
+  }
+  const done = new Set(voiceClips().filter((v) => v.segId).map((v) => v.segId));
+  const todo = segs.filter((sg) => !done.has(sg.id));
+  let ok = 0, fail = 0, lastErr = '';
+  for (let i = 0; i < todo.length; i++) {
+    const sg = todo[i];
+    const text = narrationText(sg);
+    status(`나레이션 ${i + 1}/${todo.length} — ${text.slice(0, 20)}… (${sg.start.toFixed(1)}초부터, 자막과 1:1)`, 'warn');
+    try {
+      const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice: ($('#ttsVoice', pane) && $('#ttsVoice', pane).value) || s.voice });
+      voiceClips().filter((v) => v.segId === sg.id).forEach((v) => removeVoiceClip(v.id));
+      await addVoiceClip({ blob, name: voiceAssetName(sg, 'TTS'), start: sg.start, segId: sg.id, kind: 'tts' });
+      ok++;
+    } catch (e) {
+      fail++;
+      lastErr = e.message || String(e);
+      if (/API 키|한도|권한/.test(lastErr)) break;
+    }
+  }
+  emit('project', { panels: ['audio', 'ai'] });
+  renderTts();
+  return { ok, fail, lastErr, total: todo.length };
+}
+
+/**
+ * 자동 배치·붙여넣기·Gemini 세팅 직후 공통 처리:
+ *  ① 옛 나레이션을 비우고 ② (TTS 자동이 켜져 있으면) 자막과 1:1로 다시 만듭니다.
+ */
+async function syncNarrationAfterLayout() {
+  // 타임라인을 통째로 다시 만드는 작업이라, 옛 나레이션은 구간에 안 묶인 것까지 모두 비웁니다.
+  const removed = purgeOldNarration({ all: true });
+  const s = loadAiSettings();
+  if (s.ttsAuto === false) {
+    if (removed) emit('toast', { msg: `옛 나레이션 ${removed}개를 비웠습니다(자막과 따로 놀지 않게).`, type: 'warn' });
+    return { removed, ok: 0, fail: 0, off: true };
+  }
+  if (!s.apiKey) {
+    if (removed) emit('toast', { msg: `옛 나레이션 ${removed}개를 비웠습니다. 키를 넣으면 자막과 1:1로 다시 만들어 집니다.`, type: 'warn' });
+    return { removed, ok: 0, fail: 0, noKey: true };
+  }
+  busyState(true);
+  let r = { ok: 0, fail: 0, total: 0 };
+  try {
+    r = await narrateSegments();
+  } finally {
+    busyState(false);
+  }
+  if (r.ok || r.fail) {
+    status(`나레이션 ${r.ok}개를 자막과 1:1로 새로 만들었습니다${r.fail ? ` · 실패 ${r.fail}개${r.lastErr ? ` (${r.lastErr})` : ''}` : ''}`, r.fail ? 'warn' : 'ok');
+    emit('toast', { msg: r.fail ? `나레이션 ${r.ok}개 완료 · ${r.fail}개 실패` : `나레이션 ${r.ok}개를 자막과 똑같이 다시 만들었습니다.`, type: r.fail ? 'warn' : 'ok' });
+  }
+  return { removed, ...r };
 }
 
 function bindEvents() {
   // 설정 변경 저장
-  ['aiDesignSel', 'aiImageDur', 'aiUseSfx', 'aiUseName', 'aiTopic', 'ttsVoice'].forEach((id) => {
+  ['aiDesignSel', 'aiImageDur', 'aiUseSfx', 'aiUseName', 'aiTopic', 'ttsVoice', 'aiAutoTts'].forEach((id) => {
     const el = $(`#${id}`, pane);
+    if (!el) return;
     el.addEventListener('change', saveSettingsFromUI);
     if (el.tagName === 'INPUT' && el.type === 'text') el.addEventListener('blur', saveSettingsFromUI);
   });
 
-  $('#aiOneClick', pane).addEventListener('click', () => {
+  $('#aiOneClick', pane).addEventListener('click', async () => {
     saveSettingsFromUI();
     const s = loadAiSettings();
     const hasText = (state.project.segments || []).some((sg) => (sg.title || sg.badge || sg.subtitle || '').trim());
@@ -260,7 +414,8 @@ function bindEvents() {
       const sub = res.subtitles || {};
       const subTxt = sub.count ? ` · 자막 ${sub.count}개(0~${res.duration}초, 가장 큰 빈 구간 ${sub.maxGap}초)` : '';
       emit('toast', { msg: `원클릭 배치 완료 — 컷 ${res.clips}개 · 구간 ${res.segments}개${subTxt} · 효과음 ${res.sfx}개 · ${res.design}`, type: 'ok' });
-      status(`원클릭 배치 완료 — 구간 ${res.segments}개, 자막 ${sub.count || 0}개가 0~${res.duration}초를 ${sub.maxGap > 0.4 ? `(가장 큰 빈 구간 ${sub.maxGap}초)` : '빈틈없이'} 덮습니다. 자막 글자를 바꾸려면 아래 Gemini·붙여넣기를 쓰세요.`, 'ok');
+      status(`원클릭 배치 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개, 자막 ${sub.count || 0}개가 0~${res.duration}초를 ${sub.maxGap > 0.4 ? `(가장 큰 빈 구간 ${sub.maxGap}초)` : '빈틈없이'} 덮습니다.`, 'ok');
+      await syncNarrationAfterLayout();
     } catch (e) {
       emit('toast', { msg: e.message || '자동 배치에 실패했습니다.', type: 'err' });
     }
@@ -297,15 +452,16 @@ function bindEvents() {
     }
   });
 
-  $('#aiApplyPaste', pane).addEventListener('click', () => {
+  $('#aiApplyPaste', pane).addEventListener('click', async () => {
     const text = $('#aiPaste', pane).value.trim();
     if (!text) { emit('toast', { msg: 'AI가 준 JSON을 먼저 붙여넣어 주세요.', type: 'err' }); return; }
     try {
       const plan = parsePlan(text);
       const res = applyPlan(plan);
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
-      status(`붙여넣기 적용 완료 — 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개${res.title ? ` · 제목 “${res.title}”` : ''}`, 'ok');
+      status(`붙여넣기 적용 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개`, 'ok');
       emit('toast', { msg: `자동 채우기 완료 (구간 ${res.segments}개)`, type: 'ok' });
+      await syncNarrationAfterLayout();
     } catch (e) {
       status(e.message || '적용하지 못했습니다.', 'err');
       emit('toast', { msg: e.message || '적용하지 못했습니다.', type: 'err' });
@@ -385,6 +541,7 @@ function bindEvents() {
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       status(`AI 세팅 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개`, 'ok');
       emit('toast', { msg: 'AI가 타임라인을 세팅했습니다.', type: 'ok' });
+      await syncNarrationAfterLayout();
     } catch (e) {
       status(e.message || 'AI 세팅에 실패했습니다.', 'err');
     } finally {
