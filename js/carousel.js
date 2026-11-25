@@ -211,11 +211,33 @@ function coverText() {
   return { title, badge };
 }
 
+function waitImageLoad(img, timeout = 6000) {
+  if (!img) return Promise.resolve(false);
+  if (img.complete && img.naturalWidth) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let done = false;
+    const ok = () => { if (!done) { done = true; resolve(true); } };
+    img.addEventListener('load', ok, { once: true });
+    img.addEventListener('error', () => { if (!done) { done = true; resolve(false); } }, { once: true });
+    setTimeout(() => { if (!done) { done = true; resolve(!!(img.complete && img.naturalWidth)); } }, timeout);
+  });
+}
+
 async function prepareClipFrame(clip, index) {
-  if (!clip || clip.kind !== 'video') return;
+  if (!clip) return;
+  if (clip.kind !== 'video') {
+    // 사진은 디코딩이 끝나야 검은 화면이 아니라 실제 사진이 찍힙니다.
+    await waitImageLoad(imageFor(clip.assetId));
+    return;
+  }
   const v = videoFor(clip.assetId);
   if (!v) return;
-  await waitVideoReady(v, 4000);
+  let ok = await waitVideoReady(v, 8000);
+  if (!ok || v.readyState < 2) {
+    // 첫 로딩이 늦으면 한 번 더 시도
+    try { v.load(); } catch (e) { /* 무시 */ }
+    await waitVideoReady(v, 8000);
+  }
   const dur = Math.max(0.3, clipDur(clip));
   const want = clamp((clip.trimIn || 0) + Math.min(dur * 0.35, 1.2) * (clip.speed || 1), 0, Math.max(0, (v.duration || 1) - 0.05));
   await seekVideo(v, want);
