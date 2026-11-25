@@ -116,10 +116,12 @@ export function loadProjectJson(text) {
     return a + Math.max(0.1, (tout - tin) / Math.max(0.1, c.speed || 1));
   }, 0);
   const segs = Array.isArray(raw.segments) ? raw.segments : [];
+  const hasTimeline = dur > 0.3;
   next.segments = segs.map((s) => ({
     id: s.id || uid('seg'),
-    start: clamp(Number(s.start) || 0, 0, Math.max(0, dur)),
-    end: clamp(Number(s.end) || 0, 0.2, Math.max(0.2, dur)),
+    // 미디어가 아직 없으면(템플릿만 불러옴) 원래 시간을 그대로 두고, 미디어를 넣을 때 맞춰집니다.
+    start: hasTimeline ? clamp(Number(s.start) || 0, 0, Math.max(0, dur)) : Math.max(0, Number(s.start) || 0),
+    end: hasTimeline ? clamp(Number(s.end) || 0, 0.2, Math.max(0.2, dur)) : Math.max(0.2, Number(s.end) || 0.2),
     title: s.title || '',
     badge: s.badge || '',
     subtitle: s.subtitle || '',
