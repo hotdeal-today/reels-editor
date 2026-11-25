@@ -1,7 +1,7 @@
 // main.js — 앱 부팅 · 탭 · 전역 이벤트
 import { $, $$, clamp, on, emit, fmtSec } from './util.js';
 import { state, loadProject, loadAssets, persist, newProject, totalDuration, activeSegment, getAsset } from './state.js';
-import { openDB } from './db.js';
+import { openDB, idbClear } from './db.js';
 import { warmupBuiltinFonts, loadCustomFontsFromDB, ensureFont } from './fonts.js';
 import { initClipsPanel, addMediaFiles, refreshClips, setSelectedClip } from './panels/clips.js';
 import { initTextPanel, refreshTextPanel, syncPositionInputs, renderStyleCard } from './panels/text.js';
@@ -114,11 +114,12 @@ function bindTransport() {
       actions: [
         { label: '취소', cls: 'ghost' },
         {
-          label: '새로 시작', cls: 'primary', onClick: () => {
+          label: '새로 시작', cls: 'primary', onClick: async () => {
             newProject();
             state.assets.forEach((a) => { if (a.url) URL.revokeObjectURL(a.url); });
             state.assets.clear();
             state.time = 0;
+            try { await idbClear('assets'); } catch (e) { console.warn(e); }
             refreshAll();
             emit('toast', { msg: '새 프로젝트를 시작했습니다.', type: 'ok' });
           },
