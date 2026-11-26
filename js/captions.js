@@ -295,7 +295,8 @@ function tagLine(tags) {
 
 /** 키 없이 블로그 본문만으로 만드는 5채널 캡션 */
 export function buildLocalCaptions({ title = '', body = '', hashtags = [], url = '' } = {}) {
-  const kw = extractKeywords({ title, body, hashtags, n: 3 });
+  const ownTags = (hashtags && hashtags.length) ? hashtags : (String(body || '').match(/#[^\s#]{1,20}/g) || []);
+  const kw = extractKeywords({ title, body, hashtags: ownTags, n: 3 });
   const fill = ['여행추천', '숙소추천', '주말여행'].filter((k) => !kw.includes(k));
   while (kw.length < 3) kw.push(fill.shift() || '여행정보');
   const clipTags = [...CLIP_FIXED_TAGS, ...kw.slice(0, 3).map((k) => `#${k}`)];

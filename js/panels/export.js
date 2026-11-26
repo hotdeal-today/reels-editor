@@ -913,6 +913,10 @@ async function fetchBlogInExport() {
     if ((!store || !store.cards.length) && images.length) {
       await buildFromBlog();
     }
+    // 캡션이 비어 있으면 바로 만들기
+    const cur = loadCaptionState();
+    const hasCaption = CAPTION_CHANNELS.some((ch) => (cur.captions[ch.id] || '').trim());
+    if (!hasCaption) await buildCaptionsCore();
   } catch (e) {
     capStatus(`${e.message}${e.detail ? ` [${e.detail}]` : ''}`, 'err');
   } finally {
@@ -923,47 +927,54 @@ async function fetchBlogInExport() {
 }
 
 let exModels = null;
-async function generateCaptionsInExport() {
+
+/** 캡션 생성 본체 — 자동(불러오기 직후)과 버튼 모두 여기를 부릅니다. */
+async function buildCaptionsCore() {
   const cap = loadCaptionState();
   const body = (cap.body || '').trim();
-  if (!body || body.length < 40) { capStatus('본문이 없습니다. 위에서 [불러오기]를 누르거나 AI 세팅 탭에서 본문을 넣어 주세요.', 'err'); return; }
+  if (!body || body.length < 40) { capStatus('본문이 없습니다. 위에서 [불러오기]를 누르거나 AI 세팅 탭에서 본문을 넣어 주세요.', 'err'); return null; }
+  const keywords = extractKeywords({ title: cap.title, body, n: 3 });
+  const s = loadAiSettings();
+  let caps = null;
+  if (s.apiKey) {
+    try {
+      let model = (exModels && exModels.text) || s.model;
+      if (!exModels) {
+        const ids = await listModels(s.apiKey);
+        exModels = pickModels(ids, s);
+        model = exModels.text || model;
+      }
+      capStatus(`Gemini(${model})가 5채널 캡션을 만드는 중… (10~30초)`, 'warn');
+      const raw = await askGeminiText({
+        apiKey: s.apiKey,
+        model,
+        prompt: buildCaptionPrompt(body, { url: cap.url, title: cap.title, keywords }),
+      });
+      caps = parseCaptions(raw, { body, title: cap.title, keywords });
+    } catch (e) {
+      capStatus('Gemini 실패 — 블로그 본문으로 기본 캡션을 만듭니다. (' + (e.message || e) + ')', 'warn');
+    }
+  }
+  if (!caps) {
+    const local = buildLocalCaptions({ title: cap.title, body, hashtags: [], url: cap.url });
+    caps = parseCaptions(JSON.stringify(local), { body, title: cap.title, keywords: local.keywords });
+  }
+  const merged = { ...cap.captions, ...caps };
+  saveCaptionState({ captions: merged });
+  renderExCaptions();
+  capStatus('5채널 캡션 완료 — 네이버 클립은 고정 태그 2개 + 핵심 태그 3개로 맞췄습니다.', 'ok');
+  emit('project', { panels: ['ai'] });
+  return caps;
+}
+
+async function generateCaptionsInExport() {
   if (exCapBusy) return;
   const btn = $('#exCapGen', pane);
   exCapBusy = true;
   btn.disabled = true;
   capStatus('5채널 캡션을 만드는 중…', 'warn');
-  const keywords = extractKeywords({ title: cap.title, body, n: 3 });
   try {
-    const s = loadAiSettings();
-    let caps = null;
-    if (s.apiKey) {
-      try {
-        let model = (exModels && exModels.text) || s.model;
-        if (!exModels) {
-          const ids = await listModels(s.apiKey);
-          exModels = pickModels(ids, s);
-          model = exModels.text || model;
-        }
-        capStatus(`Gemini(${model})가 5채널 캡션을 만드는 중… (10~30초)`, 'warn');
-        const raw = await askGeminiText({
-          apiKey: s.apiKey,
-          model,
-          prompt: buildCaptionPrompt(body, { url: cap.url, title: cap.title, keywords }),
-        });
-        caps = parseCaptions(raw, { body, title: cap.title, keywords });
-      } catch (e) {
-        capStatus('Gemini 실패 — 블로그 본문으로 기본 캡션을 만듭니다. (' + (e.message || e) + ')', 'warn');
-      }
-    }
-    if (!caps) {
-      const local = buildLocalCaptions({ title: cap.title, body, hashtags: [], url: cap.url });
-      caps = parseCaptions(JSON.stringify(local), { body, title: cap.title, keywords: local.keywords });
-    }
-    const merged = { ...cap.captions, ...caps };
-    saveCaptionState({ captions: merged });
-    renderExCaptions();
-    capStatus(`5채널 캡션 완료 — 네이버 클립은 고정 태그 2개 + 핵심 태그 3개로 맞췄습니다.`, 'ok');
-    emit('project', { panels: ['ai'] });
+    await buildCaptionsCore();
   } catch (e) {
     capStatus(e.message || '캡션을 만들지 못했습니다.', 'err');
   } finally {
