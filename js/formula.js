@@ -27,7 +27,7 @@ export function tempoById(id) { return TEMPOS[id] || TEMPOS.steady; }
 export const PLACEMENT = {
   title: { x: 540, y: 208 },      // 1컷 상단 후킹 (11%)
   badge: { x: 540, y: 318 },      // 1컷 배지 (17%)
-  subFirst: { x: 540, y: 1120 },  // 1컷 자막 (58%) — 제품을 가리지 않는 자리
+  subFirst: { x: 540, y: 1420 },  // 1컷 자막도 하단 세이프존(중앙 제품을 가리지 않게)
   subSafe: { x: 540, y: 1420 },   // 2컷~ 자막 (74%) — 인스타 캡션 UI 위
   endCardTop: { x: 540, y: 940 }, // 엔드카드 1줄 (49%)
   endCardBottom: { x: 540, y: 1060 }, // 엔드카드 2줄 (55%)
