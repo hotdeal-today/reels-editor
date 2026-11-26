@@ -36,7 +36,7 @@ export const PLACEMENT = {
 // ── 카피 기본 틀(키 없는 원클릭) ────────────────────────
 // {t} = 주제(또는 프로젝트 이름). 없는 정보를 지어내지 않도록 사실 주장 없는 문장만 씁니다.
 export const DEFAULT_COPY = [
-  '{t} 아직도 그대로세요?',   // ① 문제 제기
+  '아직도 그렇게 쓰세요?',     // ① 문제 제기(주제는 1컷 제목·엔드카드가 담당)
   '그냥 넘기지 마세요',        // ① 문제 제기(금지 명령)
   '이거 하나면 달라요',        // ② 전환
   '먼저 보여드릴게요',         // ③ 해결
@@ -96,20 +96,44 @@ export function applyEndCard(seg, lines) {
   return seg;
 }
 
+/** 주제에서 뒤쪽 단어만 남겨 짧은 이름을 만듭니다("아이폰 사진 백업 미니 폴더" → "사진 백업 미니 폴더"). */
+export function shortTopic(t, max = 12) {
+  const words = String(t || '').split(/\s+/).filter(Boolean);
+  let out = '';
+  for (let i = words.length - 1; i >= 0; i--) {
+    const next = out ? `${words[i]} ${out}` : words[i];
+    if (next.length > max) break;
+    out = next;
+  }
+  return out || String(t || '').slice(0, max);
+}
+
+/** 한 줄 자막을 14자 안으로 자릅니다(단어 경계). */
+export function fitLine(s, limit = CAPTION_LIMIT) {
+  const str = String(s || '').trim();
+  if (str.length <= limit) return str;
+  const words = str.split(/\s+/).filter(Boolean);
+  let out = '';
+  for (const w of words) {
+    const next = out ? `${out} ${w}` : w;
+    if (next.length > limit) break;
+    out = next;
+  }
+  return (out || str.slice(0, limit)).trim();
+}
+
 /** 주제·이름에서 엔드카드 2줄을 만듭니다. */
 export function endCardLines({ topic = '', name = '' } = {}) {
-  const t = String(topic || name || '').replace(/\s+/g, ' ').trim();
-  const fill = (s) => s.replace(/\{t\}/g, t);
-  const top = t ? fill(END_CARD.top).slice(0, 16) : '오늘의 추천';
-  const bottom = fill(END_CARD.bottom).slice(0, 16);
-  return [top, bottom];
+  const t = shortTopic(String(topic || name || '').replace(/\s+/g, ' ').trim(), 10);
+  if (!t) return ['오늘의 추천', '그냥 지나치지 마세요'];
+  return [fitLine(`${t} 하나로`, 14), fitLine(END_CARD.bottom, 14)];
 }
 
 /** 카피 틀(줄 단위)을 실제 자막 문장 배열로 바꿉니다. */
 export function copyLinesFromText(text) {
   return String(text || '')
     .split(/\n+/)
-    .map((s) => s.replace(/^[\s\-•\d.)\]]+/, '').trim())
+    .map((s) => s.replace(/^\s*(?:[-•·]|\d+[.)\]])\s*/, '').trim())
     .filter(Boolean);
 }
 
@@ -120,14 +144,20 @@ export function copyLinesFromText(text) {
  */
 export function buildBeats({ count = 8, topic = '', name = '', copy = null } = {}) {
   const t = String(topic || name || '').replace(/\s+/g, ' ').trim();
-  const fill = (s) => String(s).replace(/\{t\}/g, t).trim();
+  const short = shortTopic(t, 12);
+  const fill = (s) => String(s)
+    .replace(/\{t\}/g, t)
+    .replace(/\{ts\}/g, short)
+    .trim();
   const pool = (copy && copy.length ? copy : DEFAULT_COPY).map(fill).filter(Boolean);
   const fallback = DEFAULT_COPY.map(fill).filter(Boolean);
   const n = Math.max(1, Math.min(120, count | 0));
   const out = [];
   for (let i = 0; i < n; i++) {
-    const src = pool.length ? pool[i % pool.length] : (fallback[i % fallback.length] || '');
-    out.push(src.slice(0, 24));
+    const tpl = pool.length ? pool[i % pool.length] : (fallback[i % fallback.length] || '');
+    // {t}가 들어간 문장만 14자 제한으로 다듬습니다(직접 쓴 카피는 그대로 살립니다).
+    const line = /\{t|\{ts\}/.test(String(tpl)) ? fitLine(tpl, CAPTION_LIMIT) : String(tpl).slice(0, 40);
+    out.push(line.trim());
   }
   return out;
 }

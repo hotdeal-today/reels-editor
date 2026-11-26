@@ -660,7 +660,9 @@ export function autoLayout(opts = {}) {
   //  · 카피 틀(s.copyLines)이 있으면 그 줄을, 없으면 formula.js 기본 틀을 씁니다.
   //  · 없는 사실(가격·효능)은 기본 틀이 지어내지 않습니다 — 화면에 보이는 것만 Gemini가 채웁니다.
   const copy = copyLinesFromText(s.copyLines);
+  const poolLines = buildBeats({ count: Math.max(1, copy.length || 9), topic, name, copy: copy.length ? copy : null });
   const lines = buildBeats({ count: Math.max(1, beats), topic, name, copy: copy.length ? copy : null });
+  const ctaLine = poolLines.length ? poolLines[poolLines.length - 1] : CTA_TEXT;
 
   const segsBuild = Array.from({ length: Math.max(1, beats) }, (_, i) => ({
     id: uid('seg'),
@@ -672,7 +674,7 @@ export function autoLayout(opts = {}) {
   segsBuild[0].badge = head.badge;
   // 마지막 두 칸: CTA → 엔드카드 2줄 (레퍼런스 문법). 칸이 모자라면 마지막 한 칸만 CTA.
   if (segsBuild.length >= 5) {
-    segsBuild[segsBuild.length - 2].subtitle = copy.length ? (lines[lines.length - 1] || CTA_TEXT) : CTA_TEXT;
+    segsBuild[segsBuild.length - 2].subtitle = ctaLine || CTA_TEXT;
   } else {
     segsBuild[segsBuild.length - 1].subtitle = hookText;
   }
