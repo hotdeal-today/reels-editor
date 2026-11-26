@@ -503,6 +503,9 @@ async function buildFromBlog() {
   saveCarousel({ ratio: carRatio(), cards: made.cards });
   carSelId = made.cards[0].id;
   await renderAll({ force: true });
+  const noClips = !state.project.clips.length;
+  const tail = noClips ? ' 릴스 영상까지 만들려면 AI 세팅 탭의 [⚡ 둘 다 만들기]를 쓰세요.' : '';
+  setCarNote(`${made.cards.length}장 완성${made.notice ? ` · ${made.notice}` : ''} — 카드를 눌러 고치고 저장하세요.${tail}`);
   emit('toast', { msg: `블로그 사진으로 카드 ${made.cards.length}장을 만들었습니다.`, type: 'ok' });
 }
 
