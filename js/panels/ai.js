@@ -1,15 +1,20 @@
 // panels/ai.js — 탭5: AI 자동 세팅 (원클릭 · 프롬프트 복사/붙여넣기 · Gemini · TTS · 프로젝트 파일)
-import { $, $$, clamp, emit, escapeHtml, fmtSec, downloadBlob } from '../util.js';
-import { state, totalDuration, persist, getAsset } from '../state.js';
+import { $, $$, clamp, emit, escapeHtml, fmtSec, downloadBlob, uid } from '../util.js';
+import { state, totalDuration, persist, getAsset, ensureSegments } from '../state.js';
 import {
   loadAiSettings, saveAiSettings, maskKey, listModels, pickModels,
   buildChatPrompt, buildPrompt, collectFrames, askGemini, askGeminiText, parsePlan, applyPlan,
-  autoLayout, applyDesignSet, VOICES, TTS_MODEL_CANDIDATES, TEXT_MODEL_CANDIDATES,
+  autoLayout, applyDesignSet, VOICES, TTS_MODEL_CANDIDATES, TEXT_MODEL_CANDIDATES, subtitleStats,
 } from '../ai.js';
 import {
   CAPTION_CHANNELS, loadCaptionState, saveCaptionState, fetchBlogText,
   buildCaptionPrompt, parseCaptions, checkNaverClipCaption, normalizeBlogUrl,
+  buildLocalCaptions, extractKeywords, pickInfoLines,
 } from '../captions.js';
+import { loadBlogStore, loadBlogIntoProject } from '../blogflow.js';
+import { cardsFromImages, cardsFromTimeline, saveCarousel } from '../carousel.js';
+import { reloadCarouselFromProject } from './export.js';
+import { makeClip } from '../media.js';
 import { DESIGN_SETS } from '../presets.js';
 import { DEFAULT_COPY } from '../formula.js';
 import {
@@ -38,8 +43,68 @@ export function initAiPanel(el) {
       아래 <b>무료 원클릭</b>은 키가 필요 없고, <b>Gemini</b>는 무료 API 키를 넣으면 사진을 읽고 제목·자막까지 만들어 줍니다.</p>
     </div>
 
+    <div class="sec" data-sec="blog">
+      <div class="sec-head">📥 블로그 URL 하나로 끝내기 <span class="count">릴스 · 캐러셀 · 5채널 캡션</span></div>
+      <div class="card ai-card blog-hub">
+        <div class="row">
+          <label>블로그 URL</label>
+          <input type="text" class="grow" id="blogUrl" placeholder="https://blog.naver.com/rkwhr83/224491139890" spellcheck="false" autocomplete="off">
+          <button class="btn tiny" id="blogLoad" type="button">불러오기</button>
+        </div>
+        <div class="sec-note" style="margin:6px 0 7px">
+          네이버 블로그 주소를 넣으면 <b>글 제목 · 본문 · 사진</b>을 가져와 <b>릴스 컷</b>과 <b>캐러셀 카드</b>, <b>5채널 캡션</b>까지 한 번에 만듭니다.
+          사진은 프록시를 거쳐 이 브라우저로만 받아 오기 때문에 내보내기(Canvas)에서 CORS 오류가 나지 않습니다.
+        </div>
+        <div class="row" style="gap:6px;flex-wrap:wrap">
+          <label style="flex:0 0 auto">사진 길이</label>
+          <select id="blogImageDur" style="flex:1 1 90px">
+            <option value="2.2">2.2초</option>
+            <option value="2.6" selected>2.6초</option>
+            <option value="3.2">3.2초</option>
+          </select>
+          <label style="flex:0 0 auto">총 길이</label>
+          <select id="blogTotal" style="flex:1 1 80px">
+            <option value="15">15초</option>
+            <option value="18" selected>18초</option>
+            <option value="20">20초</option>
+          </select>
+          <label style="flex:0 0 auto">카드</label>
+          <select id="blogCarCount" style="flex:1 1 70px">
+            <option value="4">4장</option>
+            <option value="5" selected>5장</option>
+            <option value="6">6장</option>
+          </select>
+        </div>
+        <div class="row"><label style="flex:0 0 auto">사진 수</label>
+          <select id="blogMax" style="flex:1 1 80px">
+            <option value="4">4장</option>
+            <option value="6">6장</option>
+            <option value="8" selected>8장</option>
+            <option value="10">10장</option>
+          </select>
+          <label class="switch" style="flex:0 0 auto;margin-left:auto"><input type="checkbox" id="blogReplace" checked> 기존 컷 새로 만들기</label>
+        </div>
+        <div class="ai-status hidden" id="blogStatus"></div>
+        <div class="blog-info hidden" id="blogInfo"></div>
+        <div class="row blog-actions" style="gap:6px">
+          <button class="btn primary grow" id="blogMakeReel" type="button">⚡ 릴스 만들기</button>
+          <button class="btn grow" id="blogMakeCarousel" type="button">🖼 캐러셀</button>
+        </div>
+        <div class="row" style="gap:6px">
+          <button class="btn primary block" id="blogMakeAll" type="button">⚡ 둘 다 만들기 (릴스 + 캐러셀 + 캡션)</button>
+        </div>
+        <div class="row" style="gap:6px">
+          <button class="btn sm ghost grow" id="blogGoExport" type="button">4번 내보내기에서 카드 고치기 →</button>
+        </div>
+        <div class="sec-note" style="margin:6px 0 0">
+          컷·자막은 본문과 사진 설명에서 뽑아 만들고, Gemini 키가 저장돼 있으면 사진을 읽어 더 맞는 자막으로 다듬습니다.
+          나레이션은 아래 TTS 설정대로 자막과 1:1로 다시 만들어집니다.
+        </div>
+      </div>
+    </div>
+
     <div class="sec">
-      <div class="sec-head">📝 블로그 글 → 5채널 캡션 <span class="count">클립·인스타·유튜브·페이스북·스레드</span></div>
+      <div class="sec-head">📝 5채널 캡션 확인·수정 <span class="count">클립·인스타·유튜브·페이스북·스레드</span></div>
       <div class="card ai-card">
         <div class="row">
           <label>블로그 URL</label>
@@ -47,8 +112,8 @@ export function initAiPanel(el) {
           <button class="btn tiny" id="capFetch" type="button">가져오기 시도</button>
         </div>
         <div class="sec-note" style="margin:6px 0 7px">
-          네이버 블로그는 브라우저에서 직접 열람이 막히는 경우가 많아요. 실패하면 블로그 앱·PC에서 본문을 복사해 아래 칸에 붙여넣으면 바로 이어서 만들 수 있습니다.
-          (URL로 시도할 때는 주소만 무료 텍스트 추출 서비스로 전달됩니다.)
+          위 <b>📥 블로그 URL</b>에서 불러오면 이 칸이 자동으로 채워집니다. 본문을 직접 붙여넣어도 됩니다.
+          (URL만 무료 텍스트 추출 서비스로 전달되고, 사진·본문은 이 브라우저 안에서만 처리됩니다.)
         </div>
         <textarea id="capBody" class="ai-textarea" rows="6" placeholder="블로그 본문을 붙여넣으세요 (제목 + 본문)"></textarea>
         <div class="cap-meta" id="capMeta"></div>
@@ -223,6 +288,7 @@ export function initAiPanel(el) {
 
   bindEvents();
   initCaptions();
+  initBlogHub();
   refreshAiPanel();
 }
 
@@ -269,9 +335,10 @@ function orderSectionsFor(keyReady) {
   if (keyOrdered === !!keyReady) return;
   keyOrdered = !!keyReady;
   if (keyReady) {
-    // ✨ Gemini 카드를 히어로 바로 아래(맨 위)로
-    const first = Array.from(pane.querySelectorAll('.sec')).find((s) => s !== gemini);
-    if (first) pane.insertBefore(gemini, first);
+    // ✨ Gemini 카드는 블로그 URL 카드 바로 아래로 (블로그 URL이 항상 맨 위)
+    const blogSec = pane.querySelector('[data-sec="blog"]');
+    if (blogSec && blogSec.nextSibling) pane.insertBefore(gemini, blogSec.nextSibling);
+    else if (blogSec) pane.appendChild(gemini);
   } else if (prompt && prompt.parentNode === gemini.parentNode) {
     prompt.parentNode.insertBefore(gemini, prompt.nextSibling);
   }
@@ -906,7 +973,388 @@ function onVoiceAction(e) {
 export function refreshAiPanel() {
   if (!pane) return;
   saveSettingsFromUI();
+  syncCaptionsFromStore();
+  renderBlogInfo();
   renderTts();
+}
+
+/** 다른 탭(내보내기)에서 캡션을 고쳤으면 이 탭도 맞춥니다. */
+function syncCaptionsFromStore() {
+  const latest = loadCaptionState();
+  const changed = latest.url !== capState.url
+    || latest.body !== capState.body
+    || latest.title !== capState.title
+    || JSON.stringify(latest.captions || {}) !== JSON.stringify(capState.captions || {});
+  if (!changed) return;
+  const active = document.activeElement;
+  if (active && active.matches && active.matches('[data-captext]')) { capState = { ...latest, captions: { ...capState.captions } }; return; }
+  capState = latest;
+  const urlEl = $('#capUrl', pane);
+  const bodyEl = $('#capBody', pane);
+  if (urlEl && document.activeElement !== urlEl) urlEl.value = capState.url || '';
+  if (bodyEl && document.activeElement !== bodyEl) bodyEl.value = capState.body || '';
+  renderCapMeta();
+  renderCaptions();
+}
+
+// ══ 📥 블로그 URL 하나로 끝내기 ══════════════════════
+let blogBusy = false;
+
+function blogStatus(msg, type = '') {
+  const box = $('#blogStatus', pane);
+  if (!box) return;
+  box.classList.remove('hidden', 'ok', 'err', 'warn');
+  if (!msg) { box.classList.add('hidden'); box.textContent = ''; return; }
+  if (type) box.classList.add(type);
+  box.textContent = msg;
+}
+
+function setBlogBusy(on) {
+  blogBusy = on;
+  $$('#blogLoad, #blogMakeReel, #blogMakeCarousel, #blogMakeAll', pane).forEach((b) => { b.disabled = on; });
+  const load = $('#blogLoad', pane);
+  if (load) load.textContent = on ? '처리 중…' : '불러오기';
+}
+
+function initBlogHub() {
+  const urlEl = $('#blogUrl', pane);
+  const blog = loadBlogStore();
+  if (urlEl && blog && blog.url) urlEl.value = blog.url;
+  renderBlogInfo();
+  $('#blogLoad', pane).addEventListener('click', () => loadBlogOneStop());
+  $('#blogMakeReel', pane).addEventListener('click', () => runBlogAction('reel'));
+  $('#blogMakeCarousel', pane).addEventListener('click', () => runBlogAction('carousel'));
+  $('#blogMakeAll', pane).addEventListener('click', () => runBlogAction('both'));
+  $('#blogGoExport', pane).addEventListener('click', () => {
+    const tab = document.querySelector('.tab[data-tab="export"]');
+    if (tab) tab.click();
+  });
+  urlEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); loadBlogOneStop(); } });
+}
+
+function renderBlogInfo() {
+  const box = $('#blogInfo', pane);
+  if (!box) return;
+  const blog = loadBlogStore();
+  if (!blog || !blog.images || !blog.images.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  const thumbs = blog.images.map((it) => {
+    const a = getAsset(it.assetId);
+    return a && a.thumb ? `<img src="${a.thumb}" alt="">` : '';
+  }).join('');
+  box.innerHTML = `
+    <div class="blog-info-head"><b>${escapeHtml(blog.title || '블로그 글')}</b>
+      <span>${blog.images.length}장 · 본문 ${(blog.body || '').length.toLocaleString()}자</span></div>
+    <div class="blog-thumbs">${thumbs}</div>`;
+}
+
+async function loadBlogOneStop() {
+  if (blogBusy) return;
+  const input = $('#blogUrl', pane);
+  const url = normalizeBlogUrl(input.value);
+  if (!url) { blogStatus('블로그 주소를 먼저 입력해 주세요.', 'err'); return; }
+  input.value = url;
+  setBlogBusy(true);
+  blogStatus('글 제목·본문·사진을 가져오는 중… (최대 40초)', 'warn');
+  try {
+    const maxImages = Number($('#blogMax', pane).value) || 8;
+    const { post, images, via } = await loadBlogIntoProject(url, {
+      maxImages,
+      onProgress: (msg) => blogStatus(msg, 'warn'),
+    });
+    // 캡션 칸 동기화
+    const capUrlEl = $('#capUrl', pane);
+    const capBodyEl = $('#capBody', pane);
+    if (capUrlEl) capUrlEl.value = post.url;
+    if (capBodyEl) capBodyEl.value = post.body;
+    capState.url = post.url;
+    capState.body = post.body;
+    renderCapMeta();
+    renderCaptions();
+    const topicEl = $('#aiTopic', pane);
+    if (topicEl && !topicEl.value.trim()) { topicEl.value = String(post.title || '').slice(0, 60); saveSettingsFromUI(); }
+    renderBlogInfo();
+    emit('project', { panels: [] });
+    blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장 · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, images.length ? 'ok' : 'warn');
+    // 5채널 캡션은 바로 만들기 (키 있으면 Gemini, 없으면 본문 기반)
+    await makeCaptionsFromBlog({ silent: true });
+  } catch (e) {
+    blogStatus(`${e.message}${e.detail ? ` [${e.detail}]` : ''}`, 'err');
+  } finally {
+    setBlogBusy(false);
+  }
+}
+
+async function runBlogAction(kind) {
+  if (blogBusy) return;
+  const blog = loadBlogStore();
+  if (!blog || !blog.images || !blog.images.length) {
+    blogStatus('먼저 [불러오기]를 눌러 글과 사진을 가져오세요.', 'err');
+    return;
+  }
+  setBlogBusy(true);
+  try {
+    if (kind === 'reel' || kind === 'both') await makeReelFromBlog(blog);
+    if (kind === 'carousel' || kind === 'both') await makeCarouselFromBlog(blog);
+    if (kind === 'both') await makeCaptionsFromBlog({ silent: false });
+  } catch (e) {
+    blogStatus(e.message || '만들지 못했습니다.', 'err');
+  } finally {
+    setBlogBusy(false);
+  }
+}
+
+function splitShortLines(text, max = 16) {
+  const src = String(text || '').replace(/[🔻▶▼▽★☆■◆●•]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!src) return [];
+  if (src.length <= max) return [src];
+  const words = src.split(' ');
+  const out = [];
+  let line = '';
+  for (const w of words) {
+    const test = line ? `${line} ${w}` : w;
+    if (test.length <= max || !line) line = test;
+    else { out.push(line); line = w; }
+  }
+  if (line) out.push(line);
+  return out.map((l) => l.replace(/[,·]$/, '').trim()).filter((l) => l.length >= 2);
+}
+
+function blogHeadline(title) {
+  const t = String(title || '').replace(/[!?~]+$/, '').trim();
+  const first = t.split(/[,·|]/)[0].trim();
+  return first.length <= 14 ? first : `${first.slice(0, 13).trim()}…`;
+}
+
+function blogBadge(body) {
+  const b = String(body || '');
+  const m = b.match(/(\d{1,2})\s*%/);
+  if (/1\s*\+\s*1/.test(b)) return '1+1';
+  if (m) return `${m[1]}% 할인`;
+  if (/무료/.test(b)) return '무료';
+  if (/할인|쿠폰/.test(b)) return '할인';
+  return '총정리';
+}
+
+function sentenceParts(text) {
+  return String(text || '')
+    .split(/(?<=[.!?~])\s+|\n+/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+/** 자막 한 줄로 쓰기 좋은 문장을 고릅니다. (소제목 → 사진 앞 문단 → 본문 핵심 정보) */
+function blogLines(blog) {
+  const FILLER = /(달라질 수 있|경우가 있|수 있습니다|좋답니다|생각합니다|같습니다|정도입니다|보시면|알려드릴게요|시작해볼까요|다녀왔습니다|추천합니다)$/;
+  const GOOD = /(조식|수영장|객실|뷰|가격|할인|무료|주차|체크인|체크아웃|위치|도보|원|층|호|박|메뉴|어메니티|스파|사우나|바베큐|캠핑|전망|루프탑|라운지|키즈|프라이빗|예약|셔틀|공항|역)/;
+  const AD = /(마이리얼트립|아고다|트립닷컴|여기어때|부킹닷컴|클룩|야놀자|쿠팡|예약하기|바로가기|쿠폰|자세히 ?보기|상세 ?보기|더 ?보기)/;
+  const clean = (s) => String(s || '')
+    .replace(/^[\d]{1,2}[.)]\s*/, '')
+    .replace(/^[▼▶▪◆■●•\-\s]+/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.!?~]+$/, '')
+    .trim();
+  const cands = [];
+  let order = 0;
+  const DANGLING = /(에|은|는|이|가|을|를|과|와|도|며|고|나|랑|으로|에서|부터|까지|보다|처럼|만|의|달라질|비교해|예약하는|추천하는)$/;
+  const tidyEnding = (t) => {
+    const words = String(t || '').trim().split(' ');
+    while (words.length > 1 && words.join(' ').length > 6) {
+      const last = words[words.length - 1];
+      if (DANGLING.test(last)) words.pop();
+      else break;
+    }
+    return words.join(' ');
+  };
+  const add = (raw, score) => {
+    const t0 = tidyEnding(clean(raw));
+    const t = t0;
+    if (!t || t.length < 5 || t.length > 20) return;
+    if (AD.test(t) || FILLER.test(t)) return;
+    cands.push({ t, score, order: order++ });
+  };
+
+  // ① 소제목 — 글의 흐름을 알려 주는 짧은 말
+  for (const img of blog.images || []) add(img.section, 2);
+  // ② 사진 바로 앞 문단 — 그 사진을 설명하는 문장
+  for (const img of blog.images || []) {
+    for (const s of sentenceParts(img.caption)) {
+      const t = clean(s);
+      if (t.length <= 20) add(t, 3 + (GOOD.test(t) ? 2 : 0) + (/\d/.test(t) ? 2 : 0));
+      else {
+        const clause = t.split(/[,·]/)[0].trim();
+        if (clause.length >= 8 && clause.length <= 20) add(clause, 2);
+      }
+    }
+  }
+  // ③ 본문의 가격·혜택 문장
+  for (const l of pickInfoLines(blog.body || '', 6)) add(l, 3);
+
+  const seen = new Set();
+  const picked = [];
+  for (const c of cands.slice().sort((a, b) => (b.score - a.score) || (a.order - b.order))) {
+    const key = c.t.replace(/\s/g, '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picked.push(c);
+    if (picked.length >= 12) break;
+  }
+  picked.sort((a, b) => a.order - b.order);
+  const lines = picked.map((c) => c.t);
+  if (!lines.length) lines.push(blogHeadline(blog.title));
+  return lines;
+}
+
+function buildBlogPlan(blog, totalDur) {
+  const lines = blogLines(blog).slice(0, 12);
+  const title = blogHeadline(blog.title);
+  const badge = blogBadge(blog.body);
+  const s = loadAiSettings();
+  return {
+    title: title || '오늘의 추천',
+    badge,
+    design: s.design || 'ref',
+    segments: lines.map((subtitle) => ({ subtitle })),
+    endcard: [blogHeadline(blog.title), lines[0] || ''],
+    hook: '자세한 후기는 블로그에서 확인하세요👇',
+    totalDur,
+  };
+}
+
+function buildBlogReelPrompt(blog, totalSec) {
+  const body = String(blog.body || '').slice(0, 4000);
+  const caps = (blog.images || []).map((it, i) => `${i + 1}) ${it.caption || it.section || ''}`).join('\n');
+  return [
+    '너는 한국 여행·리빙 블로그 운영자가 쓰는 9:16 릴스(네이버 클립·인스타 릴스) 자막 작가다.',
+    '아래 블로그 본문과 사진 설명을 읽고, 릴스 자막 세팅을 JSON 하나로만 답한다.',
+    '',
+    '[규칙]',
+    '- title: 12자 이내 후킹(지명·숫자 환영). badge: 6자 이내(할인·무료·총정리 등).',
+    `- segments: 0초부터 ${totalSec}초까지 빈틈없이, subtitle은 4~14자 한 줄 해요체 구어체.`,
+    '- 본문에 있는 사실(가격·혜택·위치·시간)만 쓴다. 사진에서 확인되지 않은 효능은 쓰지 않는다.',
+    '- 첫 구간은 문제 제기, 두 번째는 "~하지 마세요" 금지, 마지막은 CTA(자세한 후기는 블로그에서).',
+    '- design: ref | neon | clean | bold 중 하나.',
+    '',
+    `[전체 길이] ${totalSec}초`,
+    `[블로그 제목] ${blog.title || ''}`,
+    '[사진 설명]',
+    caps || '(없음)',
+    '[본문]',
+    body || '(없음)',
+    '',
+    '[출력 스키마]',
+    '{"title":"릴스 제목","badge":"배지","design":"ref","segments":[{"start":0,"end":2,"subtitle":"자막"}],"endcard":["윗줄","아랫줄"],"hook":"마지막 멘트","sfx":[]}',
+  ].join('\n');
+}
+
+async function makeReelFromBlog(blog) {
+  if (!state.project) return;
+  const imageDur = Number($('#blogImageDur', pane).value) || 2.6;
+  const target = Number($('#blogTotal', pane).value) || 18;
+  const replace = $('#blogReplace', pane).checked;
+  const images = (blog.images || []).slice(0, 10);
+  if (!images.length) throw new Error('블로그 사진이 없어 릴스를 만들지 못했습니다.');
+
+  if (replace) state.project.clips = [];
+  const per = clamp(target / images.length, 1.2, 5);
+  for (const img of images) {
+    const asset = getAsset(img.assetId);
+    if (!asset) continue;
+    const clip = makeClip({ id: asset.id, kind: 'image', name: asset.name });
+    clip.duration = per;
+    clip.trimOut = per;
+    state.project.clips.push(clip);
+  }
+  if (!state.project.clips.length) throw new Error('사진을 컷으로 넣지 못했습니다.');
+  ensureSegments();
+
+  const dur = totalDuration();
+  let used = '본문 기반';
+  const s = loadAiSettings();
+  let applied = false;
+  if (s.apiKey) {
+    try {
+      busyState(true);
+      blogStatus('Gemini가 블로그 글과 사진을 보고 자막을 다듬는 중…', 'warn');
+      let model = (availableModels && availableModels.text) || s.model;
+      if (!availableModels) {
+        const ids = await listModels(s.apiKey);
+        const picked = pickModels(ids, s);
+        availableModels = picked;
+        model = picked.text || model;
+        saveAiSettings({ model });
+      }
+      const raw = await askGeminiText({ apiKey: s.apiKey, model, prompt: buildBlogReelPrompt(blog, Math.round(dur)) });
+      const plan = parsePlan(raw);
+      if (plan && plan.segments && plan.segments.length) {
+        applyPlan(plan);
+        used = 'Gemini';
+        applied = true;
+      }
+    } catch (e) {
+      // 키·한도 문제로 실패하면 본문 기반으로
+    } finally {
+      busyState(false);
+    }
+  }
+  if (!applied) {
+    const plan = buildBlogPlan(blog, dur);
+    applyPlan(plan);
+  }
+  seek(0);
+  emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
+  renderBlogInfo();
+  const stats = subtitleStats(state.project.segments, totalDuration());
+  blogStatus(`릴스 준비 완료 — 컷 ${state.project.clips.length}개 · ${totalDuration().toFixed(1)}초 · 자막 ${stats.count}개 (${used})`, 'ok');
+  emit('toast', { msg: `블로그로 릴스를 만들었습니다 (${totalDuration().toFixed(1)}초 · ${used})`, type: 'ok' });
+  await syncNarrationAfterLayout();
+}
+
+async function makeCarouselFromBlog(blog) {
+  const count = Number($('#blogCarCount', pane).value) || 5;
+  const ratio = state.project.export.carouselRatio || '4:5';
+  const made = cardsFromImages({ images: blog.images, title: blog.title, count });
+  if (!made.cards.length) throw new Error('블로그 사진으로 카드를 만들지 못했습니다.');
+  saveCarousel({ ratio, cards: made.cards });
+  await reloadCarouselFromProject();
+  blogStatus(`캐러셀 카드 ${made.cards.length}장을 만들었습니다 — 4번 내보내기에서 문구·위치·색·사진을 고치고 JPG·ZIP으로 저장하세요.`, 'ok');
+  emit('toast', { msg: `캐러셀 카드 ${made.cards.length}장을 만들었습니다.`, type: 'ok' });
+}
+
+/** 블로그 본문으로 5채널 캡션 만들기 — 키가 있으면 Gemini, 없으면 본문 기반 */
+async function makeCaptionsFromBlog({ silent = false } = {}) {
+  const cap = loadCaptionState();
+  const blog = loadBlogStore();
+  const body = (cap.body || (blog && blog.body) || '').trim();
+  if (!body || body.length < 40) return null;
+  const title = cap.title || (blog && blog.title) || '';
+  const keywords = extractKeywords({ title, body, hashtags: (blog && blog.hashtags) || [], n: 3 });
+  const s = loadAiSettings();
+  let caps = null;
+  if (s.apiKey) {
+    try {
+      if (!silent) capStatus('Gemini가 5채널 캡션을 만드는 중… (10~30초)', 'warn');
+      let model = (availableModels && availableModels.text) || s.model;
+      if (!availableModels) {
+        const ids = await listModels(s.apiKey);
+        availableModels = pickModels(ids, s);
+        model = availableModels.text || model;
+        saveAiSettings({ model });
+      }
+      const raw = await askGeminiText({ apiKey: s.apiKey, model, prompt: buildCaptionPrompt(body, { url: cap.url, title, keywords }) });
+      caps = parseCaptions(raw, { body, title, keywords });
+    } catch (e) {
+      caps = null;
+    }
+  }
+  if (!caps) {
+    const local = buildLocalCaptions({ title, body, hashtags: (blog && blog.hashtags) || [], url: cap.url });
+    caps = parseCaptions(JSON.stringify(local), { body, title, keywords: local.keywords });
+  }
+  mergeCaptions(caps);
+  const n = CAPTION_CHANNELS.filter((c) => (caps[c.id] || '').trim()).length;
+  capStatus(`5채널 캡션 준비 완료 — ${n}개 채널. 네이버 클립은 #오늘클립챌린지 #클립크리에이터 + 핵심 태그 3개로 맞췄습니다.`, n === 5 ? 'ok' : 'warn');
+  return caps;
 }
 
 // ══ 블로그 글 → 5채널 캡션 ═══════════════════════════
@@ -1088,35 +1536,44 @@ async function generateCaptions() {
   const body = ($('#capBody', pane).value || '').trim();
   if (!body) { capStatus('블로그 본문을 먼저 넣어 주세요. (URL 가져오기 또는 붙여넣기)', 'err'); return; }
   if (body.length < 40) { capStatus('본문이 너무 짧습니다. 글 전체를 붙여넣어 주세요.', 'err'); return; }
-  if (!s.apiKey) {
-    capStatus('Gemini로 만들려면 무료 API 키가 필요합니다. 키가 없다면 위의 “📋 프롬프트 복사”로 무료 ChatGPT·Gemini 채팅을 쓰세요.', 'err');
-    return;
-  }
   const btn = $('#capGenerate', pane);
   if (capBusy) return;
   capBusy = true;
   btn.disabled = true;
+  const title = loadCaptionState().title || '';
+  const keywords = extractKeywords({ title, body, n: 3 });
   let model = (availableModels && availableModels.text) || s.model;
   try {
-    if (!availableModels) {
+    let caps = null;
+    if (s.apiKey) {
+      if (!availableModels) {
+        try {
+          const ids = await listModels(s.apiKey);
+          availableModels = pickModels(ids, s);
+          model = availableModels.text || model;
+          saveAiSettings({ model });
+          renderKeyState();
+        } catch (e) { /* 기본 모델로 시도 */ }
+      }
+      capStatus(`Gemini(${model})가 5채널 캡션을 만드는 중… (10~30초)`, 'warn');
       try {
-        const ids = await listModels(s.apiKey);
-        availableModels = pickModels(ids, s);
-        model = availableModels.text || model;
-        saveAiSettings({ model });
-        renderKeyState();
-      } catch (e) { /* 기본 모델로 시도 */ }
+        const raw = await askGeminiText({
+          apiKey: s.apiKey,
+          model,
+          prompt: buildCaptionPrompt(body, { url: ($('#capUrl', pane).value || '').trim(), title, keywords }),
+        });
+        caps = parseCaptions(raw, { body, title, keywords });
+      } catch (e) {
+        caps = null;
+      }
     }
-    capStatus(`Gemini(${model})가 5채널 캡션을 만드는 중… (10~30초)`, 'warn');
-    const raw = await askGeminiText({
-      apiKey: s.apiKey,
-      model,
-      prompt: buildCaptionPrompt(body, { url: ($('#capUrl', pane).value || '').trim() }),
-    });
-    const caps = parseCaptions(raw);
+    if (!caps) {
+      const local = buildLocalCaptions({ title, body, hashtags: [], url: ($('#capUrl', pane).value || '').trim() });
+      caps = parseCaptions(JSON.stringify(local), { body, title, keywords: local.keywords });
+    }
     mergeCaptions(caps);
     const n = CAPTION_CHANNELS.filter((c) => (caps[c.id] || '').trim()).length;
-    capStatus(`5채널 캡션 준비 완료 — ${n}개 채널. 각 칸에서 고치고 📋 복사하세요.`, n === 5 ? 'ok' : 'warn');
+    capStatus(`5채널 캡션 준비 완료 — ${n}개 채널${s.apiKey ? '' : ' (Gemini 키가 없어 본문 기반으로 만들었습니다)'}. 각 칸에서 고치고 📋 복사하세요.`, n === 5 ? 'ok' : 'warn');
     const nu = $('#capUrl', pane).value.trim();
     if (nu) saveCaptionState({ url: nu });
   } catch (e) {

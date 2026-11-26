@@ -961,3 +961,49 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   .car-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cap-text { font-size: 11px; }
 }
+
+/* ── 📥 블로그 URL 하나로 끝내기 (AI 세팅 탭) ───────── */
+.blog-hub .row { gap: 6px; }
+.blog-info { margin: 8px 0 8px; padding: 8px 9px; background: #0f1319; border: 1px solid var(--line); border-radius: 9px; }
+.blog-info-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.blog-info-head b { font-size: 11.5px; line-height: 1.35; }
+.blog-info-head span { font-size: 9.5px; color: var(--muted); }
+.blog-thumbs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin-top: 6px; }
+.blog-thumbs img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 5px; background: #0b0e13; display: block; }
+.blog-actions { margin-top: 8px; }
+
+/* ── 캐러셀 카드 편집기 ─────────────────────────────-- */
+.car-item { cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.car-item.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(255, 216, 77, .45); }
+.car-num {
+  position: absolute; top: 4px; left: 4px; min-width: 16px; height: 16px; padding: 0 4px;
+  display: grid; place-items: center; border-radius: 8px;
+  background: rgba(8, 10, 14, .72); color: #fff; font-size: 9px; font-weight: 700;
+}
+.car-role {
+  position: absolute; top: 4px; right: 4px; padding: 1px 6px; border-radius: 8px;
+  background: var(--accent); color: var(--accent-ink); font-size: 8.5px; font-weight: 800;
+}
+.car-editor {
+  margin-top: 9px; padding: 9px; background: #0f1319;
+  border: 1px solid rgba(255, 216, 77, .3); border-radius: 10px;
+}
+.car-editor.hidden { display: none; }
+.ce-head { display: flex; align-items: center; gap: 4px; margin-bottom: 7px; }
+.ce-head b { font-size: 11.5px; }
+.ce-row { gap: 6px; margin-bottom: 6px; }
+.ce-row > label { flex: 0 0 58px; font-size: 10.5px; }
+.ce-row input[type="range"] { min-width: 0; }
+.ce-color {
+  width: 34px; height: 24px; flex: 0 0 auto; padding: 0;
+  border: 1px solid var(--line-2); border-radius: 6px; background: transparent;
+}
+.ce-swatches { display: flex; gap: 3px; flex-wrap: wrap; }
+.ce-swatches .sw {
+  width: 17px; height: 17px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25);
+  cursor: pointer; padding: 0;
+}
+.ce-swatches .sw:hover { transform: scale(1.12); }
+.car-editor .seg-btns { padding: 2px; }
+.car-editor .seg-btns button { font-size: 10px; padding: 4px 2px; }
+.car-editor .btn.tiny.danger { color: #ffb3ba; border-color: rgba(255, 95, 109, .4); }

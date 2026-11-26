@@ -1,18 +1,36 @@
-// panels/export.js — 탭4: 내보내기
-import { $, emit, clamp, downloadBlob, fmtSec } from '../util.js';
+// panels/export.js — 탭4: 내보내기 (MP4 · 캐러셀 카드 편집 · 5채널 캡션)
+import { $, clamp, emit, downloadBlob, escapeHtml, fmtSec } from '../util.js';
 import { state, totalDuration, persist } from '../state.js';
 import { exportVideo, detectSupport, saveThumbnail } from '../export.js';
-import { buildCarousel, releaseCards, carouselFileName, rebuildCarouselCard, rebuildCoverCard, CAROUSEL_COUNTS, CAROUSEL_DEFAULT_COUNT } from '../carousel.js';
+import {
+  CAROUSEL_COUNTS, CAROUSEL_DEFAULT_COUNT, CAROUSEL_RATIOS, CARD_POSITIONS, TEXT_SWATCHES, ACCENT_SWATCHES,
+  getCarousel, saveCarousel, cardsFromTimeline, cardsFromImages, renderCards, renderCard, releaseCards,
+  cardSignature, carouselFileName, patchCard, addCardFromPool, removeCardById, projectPhotos, findCard,
+} from '../carousel.js';
+import { loadBlogStore } from '../blog.js';
+import { loadBlogIntoProject } from '../blogflow.js';
+import { buildZip } from '../zip.js';
+import {
+  CAPTION_CHANNELS, loadCaptionState, saveCaptionState, buildCaptionPrompt, parseCaptions,
+  buildLocalCaptions, checkNaverClipCaption, extractKeywords, normalizeBlogUrl,
+} from '../captions.js';
+import { loadAiSettings, listModels, pickModels, askGeminiText } from '../ai.js';
 import { pause, requestRender } from '../player.js';
 
 let pane = null;
 let busy = false;
 let support = null;
 let logLines = [];
+
+let carRuntime = [];
+let carSig = '';
+let carSelId = '';
 let carBusy = false;
-let carCards = [];
+let carNoteMsg = '';
+const cardRendering = new Set();
 const cardTextTimers = new Map();
-let cardBusy = new Set();
+let capSaveTimer = null;
+let exCapBusy = false;
 
 export function initExportPanel(el) {
   pane = el;
@@ -20,6 +38,21 @@ export function initExportPanel(el) {
     <div class="export-hero">
       <b>실제 MP4 파일로 저장</b>
       <p>사진·영상·음성 모두 이 브라우저 안에서만 처리되고, 서버로는 아무것도 전송되지 않습니다.</p>
+    </div>
+
+    <div class="sec" data-sec="cap">
+      <div class="sec-head">📝 블로그 URL · 5채널 캡션 <span class="count">AI 세팅과 같은 상태</span></div>
+      <div class="sec-note" style="margin:0 0 7px">AI 세팅 탭에서 블로그를 불러왔으면 URL·본문이 이미 채워져 있습니다. 여기서 다시 불러오거나 다시 만들어도 됩니다.</div>
+      <div class="row">
+        <label>블로그 URL</label>
+        <input type="text" class="grow" id="exCapUrl" placeholder="https://blog.naver.com/…" spellcheck="false" autocomplete="off">
+        <button class="btn tiny" id="exCapFetch" type="button">불러오기</button>
+      </div>
+      <div class="row" style="gap:6px">
+        <button class="btn sm primary grow" id="exCapGen" type="button">✨ 5채널 캡션 만들기</button>
+      </div>
+      <div class="ai-status hidden" id="exCapStatus"></div>
+      <div class="cap-out" id="exCapOut"></div>
     </div>
 
     <div class="sec">
@@ -47,9 +80,12 @@ export function initExportPanel(el) {
       <div class="export-log" id="expLog">대기 중…</div>
     </div>
 
-    <div class="sec">
-      <div class="sec-head">🖼️ 캐러셀 이미지 세트</div>
-      <div class="sec-note">1번 카드(대표 썸네일 + 제목·배지) + 타임라인 전체에서 고른 <b>서로 다른 장면</b> 카드(그 시점 자막)를 JPG로 만듭니다. 같은 장면이 두 번 나오지 않습니다. 인스타 피드는 4:5, 클립·스토리는 9:16.</div>
+    <div class="sec" data-sec="carousel">
+      <div class="sec-head">🖼️ 캐러셀 카드 <span class="count">만들고 · 고치고 · 저장</span></div>
+      <div class="sec-note">
+        블로그 사진이나 지금 컷에서 <b>대표 카드 + 장면 카드 4~6장</b>을 자동으로 만듭니다.
+        카드를 누르면 <b>제목·부제·위치·글자 크기·색·사진</b>을 그 자리에서 고칠 수 있고, 고친 그대로 JPG·ZIP으로 저장됩니다.
+      </div>
       <div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
         <label style="min-width:52px">장수</label>
         <div class="seg-btns grow" id="carCount">
@@ -60,11 +96,66 @@ export function initExportPanel(el) {
         <button type="button" data-car-ratio="4:5">4:5 피드 (1080×1350)</button>
         <button type="button" data-car-ratio="9:16">9:16 세로 (1080×1920)</button>
       </div>
-      <button class="btn primary block" id="doCarousel" type="button">🖼️ 캐러셀 이미지 생성</button>
+      <div class="row" style="gap:6px">
+        <button class="btn primary grow" id="carFromClips" type="button">⚡ 지금 컷으로 카드 만들기</button>
+        <button class="btn grow" id="carFromBlog" type="button">📥 블로그 사진으로</button>
+      </div>
       <div class="progress-wrap"><i id="carProgress"></i></div>
       <div class="car-note" id="carNote">아직 만든 카드가 없습니다.</div>
       <div class="car-grid" id="carGrid"></div>
-      <button class="btn block" id="carSaveAll" type="button" style="margin-top:8px;display:none">📥 카드 모두 저장 (JPG)</button>
+
+      <div class="car-editor hidden" id="carEditor">
+        <div class="ce-head">
+          <b id="ceTitle">카드 편집</b>
+          <span class="grow"></span>
+          <button class="btn tiny ghost" id="cePrev" type="button" title="이전 카드">←</button>
+          <button class="btn tiny ghost" id="ceNext" type="button" title="다음 카드">→</button>
+          <button class="btn tiny ghost" id="ceAdd" type="button" title="카드 추가">＋</button>
+          <button class="btn tiny ghost danger" id="ceDel" type="button" title="이 카드 삭제">🗑</button>
+          <button class="btn tiny ghost" id="ceClose" type="button" title="닫기">✕</button>
+        </div>
+        <div class="row ce-row"><label>제목</label><input type="text" class="grow" id="ceTitleInput" maxlength="60" placeholder="카드 제목"></div>
+        <div class="row ce-row"><label>부제</label><input type="text" class="grow" id="ceSubInput" maxlength="90" placeholder="부제(자막)"></div>
+        <div class="row ce-row">
+          <label>위치</label>
+          <div class="seg-btns grow" id="cePos">
+            ${CARD_POSITIONS.map((p) => `<button type="button" data-pos="${p.id}">${p.label}</button>`).join('')}
+          </div>
+        </div>
+        <div class="row ce-row"><label>세로</label><input type="range" class="grow" id="ceY" min="6" max="94" step="1"><span class="val" id="ceYVal">82%</span></div>
+        <div class="row ce-row"><label>제목 크기</label><input type="range" class="grow" id="ceSize" min="28" max="120" step="1"><span class="val" id="ceSizeVal">66</span></div>
+        <div class="row ce-row"><label>부제 크기</label><input type="range" class="grow" id="ceSubSize" min="16" max="80" step="1"><span class="val" id="ceSubSizeVal">40</span></div>
+        <div class="row ce-row">
+          <label>글자 색</label>
+          <input type="color" id="ceColor" class="ce-color">
+          <div class="ce-swatches" id="ceColorSwatches">
+            ${TEXT_SWATCHES.map((c) => `<button type="button" class="sw" data-swatch="text" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+          </div>
+        </div>
+        <div class="row ce-row">
+          <label>강조 바</label>
+          <input type="color" id="ceAccent" class="ce-color">
+          <div class="ce-swatches" id="ceAccentSwatches">
+            ${ACCENT_SWATCHES.map((c) => `<button type="button" class="sw" data-swatch="accent" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+          </div>
+          <label class="switch" style="flex:0 0 auto"><input type="checkbox" id="ceAccentOn"> 배경 켜기</label>
+        </div>
+        <div class="row ce-row">
+          <label>사진</label>
+          <select class="grow" id="cePhoto"></select>
+          <button class="btn tiny" id="cePhotoFile" type="button">파일</button>
+        </div>
+        <div class="row ce-row"><label>확대</label><input type="range" class="grow" id="ceZoom" min="100" max="250" step="1"><span class="val" id="ceZoomVal">100%</span></div>
+        <div class="row ce-row"><label>좌우</label><input type="range" class="grow" id="ceCropX" min="-50" max="50" step="1"><span class="val" id="ceCropXVal">0</span></div>
+        <div class="row ce-row"><label>위아래</label><input type="range" class="grow" id="ceCropY" min="-50" max="50" step="1"><span class="val" id="ceCropYVal">0</span></div>
+        <input type="file" id="cePhotoInput" accept="image/*" hidden>
+        <div class="sec-note" id="ceNote" style="margin:2px 0 0">고친 내용은 미리보기와 저장 파일에 바로 반영됩니다.</div>
+      </div>
+
+      <div class="row" style="gap:6px;margin-top:8px" id="carSaveRow">
+        <button class="btn grow" id="carSaveAll" type="button" style="display:none">📥 JPG 모두 저장</button>
+        <button class="btn grow" id="carZip" type="button" style="display:none">🗜 ZIP으로 저장</button>
+      </div>
     </div>
 
     <div class="sec">
@@ -83,6 +174,20 @@ export function initExportPanel(el) {
     </div>
   `;
 
+  bindMp4();
+  bindCarousel();
+  bindCaptions();
+
+  syncRes();
+  syncCarRatio();
+  syncCarCount();
+  renderSpecs();
+  refreshSupport();
+  syncCarUI();
+}
+
+// ══ MP4 ═════════════════════════════════════════════════
+function bindMp4() {
   $('#resBtns', pane).addEventListener('click', (e) => {
     const b = e.target.closest('[data-res]');
     if (!b) return;
@@ -100,70 +205,13 @@ export function initExportPanel(el) {
 
   $('#doExport', pane).addEventListener('click', () => runExport());
   $('#doThumb', pane).addEventListener('click', () => runThumb());
-  $('#carRatio', pane).addEventListener('click', (e) => {
-    const b = e.target.closest('[data-car-ratio]');
-    if (!b) return;
-    state.project.export.carouselRatio = b.dataset.carRatio;
-    persist();
-    syncCarRatio();
-  });
-  $('#doCarousel', pane).addEventListener('click', () => runCarousel());
-  $('#carCount', pane).addEventListener('click', (e) => {
-    const b = e.target.closest('[data-car-count]');
-    if (!b) return;
-    state.project.export.carouselCount = Number(b.dataset.carCount) || CAROUSEL_DEFAULT_COUNT;
-    persist();
-    syncCarCount();
-  });
-  $('#carGrid', pane).addEventListener('click', (e) => {
-    const b = e.target.closest('[data-carsave]');
-    if (!b) return;
-    const card = carCards.find((c) => String(c.index) === b.dataset.carsave);
-    if (!card || !card.blob) return;
-    downloadBlob(card.blob, carouselFileName(state.project.name, card.index + 1, carCards.ratio || '4:5'));
-    emit('toast', { msg: `카드 ${card.index + 1}장을 저장했습니다.`, type: 'ok' });
-  });
-  $('#carGrid', pane).addEventListener('change', (e) => {
-    const input = e.target.closest('[data-cartime]');
-    if (input) { reshotCard(Number(input.dataset.cartime), Number(input.value)); return; }
-    const txt = e.target.closest('[data-cartext]');
-    if (txt) { clearTimeout(cardTextTimers.get(Number(txt.dataset.cartext))); rerenderCardText(Number(txt.dataset.cartext), txt.value); }
-  });
-  $('#carGrid', pane).addEventListener('input', (e) => {
-    const txt = e.target.closest('[data-cartext]');
-    if (!txt) return;
-    const idx = Number(txt.dataset.cartext);
-    clearTimeout(cardTextTimers.get(idx));
-    cardTextTimers.set(idx, setTimeout(() => rerenderCardText(idx, txt.value), 420));
-  });
-  $('#carSaveAll', pane).addEventListener('click', () => saveAllCards());
-
-  syncRes();
-  syncCarRatio();
-  syncCarCount();
-  renderSpecs();
-  refreshSupport();
-}
-
-function syncCarRatio() {
-  const cur = state.project.export.carouselRatio || '4:5';
-  pane.querySelectorAll('[data-car-ratio]').forEach((b) => b.classList.toggle('on', b.dataset.carRatio === cur));
-}
-
-function syncCarCount() {
-  const cur = Number(state.project.export.carouselCount) || CAROUSEL_DEFAULT_COUNT;
-  pane.querySelectorAll('[data-car-count]').forEach((b) => b.classList.toggle('on', Number(b.dataset.carCount) === cur));
-}
-
-function carCount() {
-  return Number(state.project.export.carouselCount) || CAROUSEL_DEFAULT_COUNT;
 }
 
 function syncRes() {
   const w = state.project.export.width;
   pane.querySelectorAll('[data-res]').forEach((b) => b.classList.toggle('on', Number(b.dataset.res) === (w === 720 ? 720 : 1080)));
   const chk = $('#realtimeChk', pane);
-  chk.checked = !!state.project.export.realtime;
+  if (chk) chk.checked = !!state.project.export.realtime;
 }
 
 function renderSpecs() {
@@ -173,6 +221,7 @@ function renderSpecs() {
   const mbps = w >= 1080 ? 8 : 4.5;
   const size = (mbps * 1000 * 1000 * dur) / 8;
   const specs = $('#specs', pane);
+  if (!specs) return;
   specs.innerHTML = `
     <div class="spec"><span>길이</span><b>${fmtSec(dur)}</b></div>
     <div class="spec"><span>해상도</span><b>${w}×${h}</b></div>
@@ -203,12 +252,9 @@ function log(line) {
   logLines.push(line);
   if (logLines.length > 60) logLines = logLines.slice(-60);
   const el = $('#expLog', pane);
-  if (el) el.innerHTML = logLines.map((l) => `<b>›</b> ${escapeLog(l)}`).join('<br>');
-  const box = $('#expLog', pane);
-  if (box) box.scrollTop = box.scrollHeight;
+  if (el) el.innerHTML = logLines.map((l) => `<b>›</b> ${escapeHtml(l)}`).join('<br>');
+  if (el) el.scrollTop = el.scrollHeight;
 }
-function escapeLog(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-function escapeAttr(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 function setProgress(p, sub) {
   const bar = $('#expProgress', pane);
@@ -286,182 +332,682 @@ function safeName(s) {
   return String(s).replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40) || 'reels';
 }
 
-// ── 캐러셀 이미지 세트 ───────────────────────────────
-async function runCarousel() {
-  if (carBusy) return;
+// ══ 캐러셀 카드 ═════════════════════════════════════════
+function carStore() { return getCarousel(); }
+function carCount() { return Number(state.project.export.carouselCount) || CAROUSEL_DEFAULT_COUNT; }
+function carRatio() { return state.project.export.carouselRatio || (carStore() && carStore().ratio) || '4:5'; }
+
+function bindCarousel() {
+  $('#carRatio', pane).addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-car-ratio]');
+    if (!b) return;
+    const ratio = b.dataset.carRatio;
+    state.project.export.carouselRatio = ratio;
+    persist();
+    syncCarRatio();
+    const store = carStore();
+    if (store && store.cards.length) {
+      saveCarousel({ ratio, cards: store.cards });
+      await renderAll({ force: true });
+    }
+  });
+  $('#carCount', pane).addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-car-count]');
+    if (!b) return;
+    state.project.export.carouselCount = Number(b.dataset.carCount) || CAROUSEL_DEFAULT_COUNT;
+    persist();
+    syncCarCount();
+    await applyCount(carCount());
+  });
+  $('#carFromClips', pane).addEventListener('click', () => buildFromClips());
+  $('#carFromBlog', pane).addEventListener('click', () => buildFromBlog());
+  $('#carSaveAll', pane).addEventListener('click', () => saveAllJpg());
+  $('#carZip', pane).addEventListener('click', () => saveZip());
+  $('#carGrid', pane).addEventListener('click', (e) => {
+    const saveBtn = e.target.closest('[data-carsave]');
+    if (saveBtn) {
+      const idx = Number(saveBtn.dataset.carsave);
+      const card = carRuntime[idx];
+      if (card && card.blob) {
+        downloadBlob(card.blob, carouselFileName(state.project.name, idx + 1, carStore() ? carStore().ratio : carRatio()));
+        emit('toast', { msg: `카드 ${idx + 1}장을 저장했습니다.`, type: 'ok' });
+      }
+      return;
+    }
+    const item = e.target.closest('[data-carid]');
+    if (item) selectCard(item.dataset.carid);
+  });
+
+  // 편집기
+  $('#ceClose', pane).addEventListener('click', () => { carSelId = ''; syncCarUI(); });
+  $('#cePrev', pane).addEventListener('click', () => stepCard(-1));
+  $('#ceNext', pane).addEventListener('click', () => stepCard(1));
+  $('#ceAdd', pane).addEventListener('click', () => addCard());
+  $('#ceDel', pane).addEventListener('click', () => deleteCard());
+
+  const textEdit = (input, field) => {
+    input.addEventListener('input', () => {
+      clearTimeout(cardTextTimers.get(field));
+      cardTextTimers.set(field, setTimeout(() => editCard({ [field]: input.value }), 380));
+    });
+  };
+  textEdit($('#ceTitleInput', pane), 'title');
+  textEdit($('#ceSubInput', pane), 'subtitle');
+
+  $('#cePos', pane).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pos]');
+    if (!b) return;
+    const pos = CARD_POSITIONS.find((p) => p.id === b.dataset.pos);
+    if (!pos) return;
+    editCard({ style: { pos: pos.id, y: pos.y } }, { immediate: true });
+  });
+  const rangeEdit = (el, apply, label) => {
+    el.addEventListener('input', () => {
+      if (label) label.textContent = el.value;
+      clearTimeout(cardTextTimers.get(el.id));
+      cardTextTimers.set(el.id, setTimeout(() => apply(Number(el.value)), 130));
+    });
+  };
+  rangeEdit($('#ceY', pane), (v) => editCard({ style: { y: v, pos: yPreset(v) } }), $('#ceYVal', pane));
+  rangeEdit($('#ceSize', pane), (v) => editCard({ style: { size: v } }), $('#ceSizeVal', pane));
+  rangeEdit($('#ceSubSize', pane), (v) => editCard({ style: { subSize: v } }), $('#ceSubSizeVal', pane));
+  rangeEdit($('#ceZoom', pane), (v) => editCard({ crop: { zoom: v } }), $('#ceZoomVal', pane));
+  rangeEdit($('#ceCropX', pane), (v) => editCard({ crop: { x: v } }), $('#ceCropXVal', pane));
+  rangeEdit($('#ceCropY', pane), (v) => editCard({ crop: { y: v } }), $('#ceCropYVal', pane));
+
+  $('#ceColor', pane).addEventListener('input', (e) => editCard({ style: { color: e.target.value } }));
+  $('#ceAccent', pane).addEventListener('input', (e) => editCard({ style: { accent: e.target.value } }));
+  $('#ceAccentOn', pane).addEventListener('change', (e) => editCard({ style: { accentOn: e.target.checked } }, { immediate: true }));
+  pane.querySelectorAll('[data-swatch]').forEach((sw) => {
+    sw.addEventListener('click', () => {
+      const color = sw.dataset.color;
+      if (sw.dataset.swatch === 'text') {
+        $('#ceColor', pane).value = color;
+        editCard({ style: { color } }, { immediate: true });
+      } else {
+        $('#ceAccent', pane).value = color;
+        editCard({ style: { accent: color, accentOn: true } }, { immediate: true });
+      }
+    });
+  });
+  $('#cePhoto', pane).addEventListener('change', (e) => {
+    editCard({ assetId: e.target.value, source: 'photo' }, { immediate: true });
+  });
+  $('#cePhotoFile', pane).addEventListener('click', () => $('#cePhotoInput', pane).click());
+  $('#cePhotoInput', pane).addEventListener('change', async () => {
+    const f = $('#cePhotoInput', pane).files && $('#cePhotoInput', pane).files[0];
+    $('#cePhotoInput', pane).value = '';
+    if (!f) return;
+    try {
+      const { importMediaFile } = await import('../media.js');
+      const { asset } = await importMediaFile(f);
+      fillPhotoSelect(asset.id);
+      editCard({ assetId: asset.id, source: 'photo' }, { immediate: true });
+      emit('toast', { msg: '카드 사진을 바꿨습니다.', type: 'ok' });
+    } catch (err) {
+      emit('toast', { msg: '사진을 넣지 못했습니다: ' + (err.message || err), type: 'err' });
+    }
+  });
+}
+
+function yPreset(y) {
+  let best = CARD_POSITIONS[0];
+  let diff = Infinity;
+  for (const p of CARD_POSITIONS) {
+    const d = Math.abs(p.y - y);
+    if (d < diff) { diff = d; best = p; }
+  }
+  return diff <= 4 ? best.id : '';
+}
+
+function syncCarRatio() {
+  const cur = carRatio();
+  pane.querySelectorAll('[data-car-ratio]').forEach((b) => b.classList.toggle('on', b.dataset.carRatio === cur));
+}
+
+function syncCarCount() {
+  const cur = carCount();
+  pane.querySelectorAll('[data-car-count]').forEach((b) => b.classList.toggle('on', Number(b.dataset.carCount) === cur));
+}
+
+function setCarNote(msg) {
+  carNoteMsg = msg;
+  const el = $('#carNote', pane);
+  if (el) el.textContent = msg;
+}
+
+async function buildFromClips() {
   if (!state.project.clips.length) { emit('toast', { msg: '먼저 사진이나 영상을 추가하세요.', type: 'err' }); return; }
+  if (carStore() && carStore().cards.length && !window.confirm('지금 만든 캐러셀 카드를 새로 만들까요? (카드에 고친 문구·색은 사라집니다)')) return;
+  const made = cardsFromTimeline({ count: carCount() });
+  saveCarousel({ ratio: carRatio(), cards: made.cards });
+  carSelId = made.cards[0] ? made.cards[0].id : '';
+  await renderAll({ force: true });
+  emit('toast', {
+    msg: made.limited ? `서로 다른 장면이 ${made.cards.length}장이라 ${made.cards.length}장으로 만들었습니다.` : `캐러셀 카드 ${made.cards.length}장을 만들었습니다.`,
+    type: made.limited ? 'warn' : 'ok',
+  });
+}
+
+async function buildFromBlog() {
+  const blog = loadBlogStore();
+  if (!blog || !blog.images || !blog.images.length) {
+    emit('toast', { msg: '위쪽 블로그 URL에서 [불러오기]를 먼저 눌러 주세요.', type: 'warn' });
+    const urlEl = $('#exCapUrl', pane);
+    if (urlEl) { urlEl.scrollIntoView({ block: 'center' }); urlEl.focus(); }
+    return;
+  }
+  if (carStore() && carStore().cards.length && !window.confirm('지금 만든 캐러셀 카드를 블로그 사진으로 새로 만들까요? (고친 문구·색은 사라집니다)')) return;
+  const made = cardsFromImages({ images: blog.images, title: blog.title, count: carCount() });
+  if (!made.cards.length) { emit('toast', { msg: '블로그 사진이 없어 카드를 만들지 못했습니다.', type: 'err' }); return; }
+  saveCarousel({ ratio: carRatio(), cards: made.cards });
+  carSelId = made.cards[0].id;
+  await renderAll({ force: true });
+  emit('toast', { msg: `블로그 사진으로 카드 ${made.cards.length}장을 만들었습니다.`, type: 'ok' });
+}
+
+async function applyCount(n) {
+  const store = carStore();
+  if (!store || !store.cards.length) return;
+  if (n > store.cards.length) {
+    while (store.cards.length < n) addCardFromPool(store.cards);
+  } else if (n < store.cards.length) {
+    store.cards.length = Math.max(2, n);
+  }
+  if (!findCard(store.cards, carSelId)) carSelId = store.cards[0] ? store.cards[0].id : '';
+  saveCarousel({ ratio: store.ratio, cards: store.cards });
+  await renderAll({ force: true });
+}
+
+async function renderAll({ force = false } = {}) {
+  if (carBusy) return;
+  const store = carStore();
+  if (!store || !store.cards.length) {
+    releaseCards(carRuntime);
+    carRuntime = [];
+    carSig = '';
+    syncCarUI();
+    return;
+  }
+  const sig = cardSignature(store.cards, store.ratio);
+  if (!force && sig === carSig && carRuntime.length === store.cards.length) { syncCarUI(); return; }
   carBusy = true;
   pause();
-  const btn = $('#doCarousel', pane);
-  btn.disabled = true;
-  btn.textContent = '카드 만드는 중…';
   const bar = $('#carProgress', pane);
-  const note = $('#carNote', pane);
   if (bar) bar.style.width = '2%';
-  if (note) note.textContent = '카드를 만드는 중…';
-  const ratio = state.project.export.carouselRatio || '4:5';
-  const count = carCount();
+  setCarNote('카드를 만드는 중…');
   try {
-    releaseCards(carCards);
-    carCards = [];
-    const res = await buildCarousel({
-      ratio,
-      count,
+    releaseCards(carRuntime);
+    carRuntime = [];
+    const list = await renderCards(store.cards, {
+      ratio: store.ratio,
       onProgress: (p, sub) => {
         if (bar) bar.style.width = `${Math.round(clamp(p, 0, 1) * 100)}%`;
-        if (note) note.textContent = `카드 만드는 중… ${sub || ''}`;
+        if (sub) setCarNote(`카드를 만드는 중… ${sub}`);
       },
     });
-    carCards = res.cards;
-    carCards.ratio = res.ratio;
+    carRuntime = list;
+    saveCarousel({ ratio: store.ratio, cards: store.cards });
+    carSig = cardSignature(store.cards, store.ratio);
+    setCarNote(`${list.length}장 완성 (${store.ratio === '9:16' ? '1080×1920' : '1080×1350'}) — 카드를 눌러 문구·위치·색·사진을 고치세요.`);
     requestRender();
-    renderCarGrid();
-    if (note) {
-      const short = res.limited && res.notice ? ` ${res.notice}` : '';
-      note.textContent = `${res.cards.length}장 완성 (${res.w}×${res.h}, 요청 ${res.requested}장)${short} — 카드를 누르면 개별 저장, 초를 바꾸면 그 장면만 다시 찍습니다.`;
-    }
-    emit('toast', {
-      msg: res.limited
-        ? `서로 다른 장면이 ${res.cards.length}장이라 ${res.cards.length}장으로 만들었습니다.`
-        : `캐러셀 카드 ${res.cards.length}장(서로 다른 장면)을 만들었습니다.`,
-      type: res.limited ? 'warn' : 'ok',
-    });
   } catch (e) {
     console.error(e);
-    if (note) note.textContent = '카드를 만들지 못했습니다: ' + (e.message || e);
+    setCarNote('카드를 만들지 못했습니다: ' + (e.message || e));
     emit('toast', { msg: '캐러셀 생성 실패: ' + (e.message || e), type: 'err' });
   } finally {
     carBusy = false;
-    btn.disabled = false;
-    btn.textContent = '🖼️ 캐러셀 이미지 생성';
-    if (bar) bar.style.width = carCards.length ? '100%' : '0%';
-    setTimeout(() => { if (bar && carCards.length) bar.style.width = '0%'; }, 1200);
+    if (bar) setTimeout(() => { if (bar) bar.style.width = '0%'; }, 900);
+    syncCarUI();
   }
+}
+
+function selectCard(id) {
+  carSelId = id;
+  syncCarUI();
+  const ed = $('#carEditor', pane);
+  if (ed && !ed.classList.contains('hidden')) ed.scrollIntoView({ block: 'nearest' });
+}
+
+function stepCard(dir) {
+  const store = carStore();
+  if (!store || !store.cards.length) return;
+  const idx = Math.max(0, store.cards.findIndex((c) => c.id === carSelId));
+  const next = (idx + dir + store.cards.length) % store.cards.length;
+  selectCard(store.cards[next].id);
+}
+
+async function addCard() {
+  const store = carStore();
+  if (!store) return;
+  if (store.cards.length >= 10) { emit('toast', { msg: '카드는 10장까지 만들 수 있습니다.' }); return; }
+  const card = addCardFromPool(store.cards);
+  saveCarousel({ ratio: store.ratio, cards: store.cards });
+  carSelId = card.id;
+  await renderAll({ force: true });
+  emit('toast', { msg: `카드 ${store.cards.length}장으로 늘렸습니다.` });
+}
+
+async function deleteCard() {
+  const store = carStore();
+  if (!store || !carSelId) return;
+  if (store.cards.length <= 2) { emit('toast', { msg: '캐러셀은 최소 2장이 필요합니다.', type: 'warn' }); return; }
+  const idx = store.cards.findIndex((c) => c.id === carSelId);
+  removeCardById(store.cards, carSelId);
+  carSelId = (store.cards[Math.min(idx, store.cards.length - 1)] || {}).id || '';
+  saveCarousel({ ratio: store.ratio, cards: store.cards });
+  await renderAll({ force: true });
+  emit('toast', { msg: '카드를 지웠습니다.' });
+}
+
+/** 편집 반영 → 그 카드만 다시 그립니다. */
+function editCard(patch, { immediate = false } = {}) {
+  const store = carStore();
+  if (!store || !carSelId) return;
+  const card = patchCard(store.cards, carSelId, patch);
+  if (!card) return;
+  saveCarousel({ ratio: store.ratio, cards: store.cards });
+  if (patch.style) syncStyleButtons(card);
+  clearTimeout(cardTextTimers.get('__render'));
+  if (immediate) renderOne(card.id);
+  else cardTextTimers.set('__render', setTimeout(() => renderOne(card.id), 300));
+}
+
+async function renderOne(id) {
+  const store = carStore();
+  if (!store) return;
+  const idx = store.cards.findIndex((c) => c.id === id);
+  if (idx < 0) return;
+  if (cardRendering.has(id)) {
+    clearTimeout(cardTextTimers.get('__queue'));
+    cardTextTimers.set('__queue', setTimeout(() => renderOne(id), 260));
+    return;
+  }
+  cardRendering.add(id);
+  try {
+    pause();
+    const fresh = await renderCard(store.cards[idx], { ratio: store.ratio });
+    if (carRuntime[idx] && carRuntime[idx].url) { try { URL.revokeObjectURL(carRuntime[idx].url); } catch (e) { /* 무시 */ } }
+    carRuntime[idx] = fresh;
+    saveCarousel({ ratio: store.ratio, cards: store.cards });
+    carSig = cardSignature(store.cards, store.ratio);
+    updateCardDom(idx);
+    setCarNote(`카드 ${idx + 1}을 고쳤습니다 — 그대로 JPG·ZIP으로 저장됩니다.`);
+    requestRender();
+  } catch (e) {
+    console.error(e);
+    setCarNote('카드를 다시 그리지 못했습니다: ' + (e.message || e));
+  } finally {
+    cardRendering.delete(id);
+  }
+}
+
+function updateCardDom(idx) {
+  const rt = carRuntime[idx];
+  const store = carStore();
+  if (!rt || !store) return;
+  const item = $(`#carGrid .car-item[data-carid="${rt.id}"]`, pane);
+  if (!item) { renderCarGrid(); return; }
+  const img = item.querySelector('img');
+  if (img && rt.url) img.src = rt.url;
+  const label = item.querySelector('.car-cap span');
+  if (label) label.textContent = cardLabel(store.cards[idx], idx);
+  if (carSelId === rt.id) fillEditor();
+}
+
+function cardLabel(card, idx) {
+  const t = String((card && card.title) || '').trim();
+  if (t) return t.length > 18 ? t.slice(0, 17) + '…' : t;
+  return idx === 0 ? '대표 카드' : `카드 ${idx + 1}`;
 }
 
 function renderCarGrid() {
   const grid = $('#carGrid', pane);
-  const saveAll = $('#carSaveAll', pane);
   if (!grid) return;
-  if (!carCards.length) {
+  const store = carStore();
+  const cards = store ? store.cards : [];
+  const tall = (store && store.ratio) === '9:16';
+  if (!cards.length) {
     grid.innerHTML = '';
-    if (saveAll) saveAll.style.display = 'none';
+    $('#carSaveAll', pane).style.display = 'none';
+    $('#carZip', pane).style.display = 'none';
     return;
   }
-  const ratio = carCards.ratio || '4:5';
-  grid.innerHTML = carCards.map((c) => {
-    const isCover = c.index === 0;
-    const total = Math.max(0, totalDuration());
-    const val = isCover ? (c.coverTitle || '') : (c.text != null ? c.text : (c.title || ''));
+  grid.innerHTML = cards.map((c, i) => {
+    const rt = carRuntime[i];
     return `
-    <div class="car-item" data-carindex="${c.index}">
-      <div class="car-thumb ${ratio === '9:16' ? 'tall' : ''}"><img src="${c.url}" alt="카드 ${c.index + 1}" loading="lazy"></div>
-      <div class="car-cap">
-        <b>${c.index + 1}</b>
-        <span>${escapeLog(c.label || '')}</span>
-        <button class="btn tiny" data-carsave="${c.index}" type="button">저장</button>
+    <div class="car-item${c.id === carSelId ? ' sel' : ''}" data-carid="${c.id}">
+      <div class="car-thumb ${tall ? 'tall' : ''}">
+        <img src="${rt && rt.url ? rt.url : ''}" alt="카드 ${i + 1}" loading="lazy">
+        <span class="car-num">${i + 1}</span>
+        ${i === 0 ? '<span class="car-role">대표</span>' : ''}
       </div>
-      <input type="text" class="car-text" data-cartext="${c.index}" value="${escapeAttr(val)}"
-        placeholder="${isCover ? '제목을 입력' : '카드 자막 입력'}" maxlength="90">
-      ${isCover ? '' : `<div class="row" style="gap:4px;margin-top:3px">
-        <input type="number" class="grow" data-cartime="${c.index}" min="0" max="${total.toFixed(1)}" step="0.1" value="${(c.t || 0).toFixed(1)}" style="padding:3px 6px;font-size:11px">
-        <span style="font-size:10.5px;color:var(--muted)">초</span>
-      </div>`}
+      <div class="car-cap">
+        <b>${i + 1}</b>
+        <span>${escapeHtml(cardLabel(c, i))}</span>
+        <button class="btn tiny" data-carsave="${i}" type="button">저장</button>
+      </div>
     </div>`;
   }).join('');
-  if (saveAll) { saveAll.style.display = 'block'; saveAll.textContent = `📥 카드 ${carCards.length}장 모두 저장 (JPG)`; }
+  $('#carSaveAll', pane).style.display = 'block';
+  $('#carZip', pane).style.display = 'block';
+  $('#carSaveAll', pane).textContent = `📥 JPG ${cards.length}장 모두 저장`;
 }
 
-/** 카드 문구를 고쳤을 때 그 카드만 다시 그리고, 입력 칸 포커스는 그대로 둡니다. */
-async function rerenderCardText(index, value) {
-  if (!carCards.length) return;
-  const pos = carCards.findIndex((c) => c.index === index);
-  if (pos < 0) return;
-  if (cardBusy.has(index)) {
-    clearTimeout(cardTextTimers.get(index));
-    cardTextTimers.set(index, setTimeout(() => rerenderCardText(index, value), 300));
+function syncCarUI() {
+  renderCarGrid();
+  const store = carStore();
+  const ed = $('#carEditor', pane);
+  if (!ed) return;
+  if (!store || !store.cards.length) {
+    ed.classList.add('hidden');
+    if (!carNoteMsg) setCarNote('아직 만든 카드가 없습니다.');
     return;
   }
-  const card = carCards[pos];
-  const ratio = carCards.ratio || '4:5';
-  cardBusy.add(index);
-  try {
-    pause();
-    const fresh = index === 0
-      ? await rebuildCoverCard({ ratio, title: value })
-      : await rebuildCarouselCard({ ratio, t: card.t, index, text: value });
-    if (card.url) { try { URL.revokeObjectURL(card.url); } catch (e) {} }
-    carCards[pos] = fresh;
-    updateCardDom(fresh);
-    requestRender();
-    const note = $('#carNote', pane);
-    if (note) note.textContent = `카드 ${index + 1} 문구를 바꿨습니다 — 저장·모두 저장하면 이 문구로 저장됩니다.`;
-  } catch (e) {
-    console.error(e);
-    emit('toast', { msg: '카드 문구 반영 실패: ' + (e.message || e), type: 'err' });
-  } finally {
-    cardBusy.delete(index);
-  }
+  if (!carSelId || !findCard(store.cards, carSelId)) carSelId = store.cards[0].id;
+  ed.classList.remove('hidden');
+  fillEditor();
 }
 
-function updateCardDom(card) {
-  const grid = $('#carGrid', pane);
-  if (!grid) return;
-  const item = grid.querySelector(`.car-item[data-carindex="${card.index}"]`);
-  if (!item) { renderCarGrid(); return; }
-  const img = item.querySelector('img');
-  if (img && card.url) img.src = card.url;
-  const cap = item.querySelector('.car-cap span');
-  if (cap) cap.textContent = card.label || '';
-  const input = item.querySelector('[data-cartext]');
-  if (input && document.activeElement !== input) {
-    input.value = card.index === 0 ? (card.coverTitle || '') : (card.text != null ? card.text : '');
+function fillPhotoSelect(currentAssetId) {
+  const sel = $('#cePhoto', pane);
+  if (!sel) return;
+  const store = carStore();
+  const card = store && carSelId ? findCard(store.cards, carSelId) : null;
+  const want = currentAssetId || (card && card.assetId) || '';
+  const photos = projectPhotos();
+  if (want && !photos.some((p) => p.assetId === want)) {
+    const name = (() => {
+      try {
+        // 자산 이름을 직접 읽기 위해 state에서 찾습니다.
+        return (window.__reels && window.__reels.state.assets.get(want) || {}).name || '지금 사진';
+      } catch (e) { return '지금 사진'; }
+    })();
+    photos.unshift({ assetId: want, name });
   }
+  sel.innerHTML = photos.length
+    ? photos.map((p) => `<option value="${p.assetId}">${escapeHtml(p.name || '사진')}</option>`).join('')
+    : '<option value="">사진 없음</option>';
+  if (want) sel.value = want;
 }
 
-async function reshotCard(index, t) {  if (carBusy || !carCards.length) return;
-  const card = carCards.find((c) => c.index === index);
-  if (!card || index === 0) return;
-  const note = $('#carNote', pane);
-  const ratio = carCards.ratio || '4:5';
-  carBusy = true;
-  try {
-    pause();
-    if (note) note.textContent = `카드 ${index + 1}을 ${Number(t).toFixed(1)}초 지점에서 다시 찍는 중…`;
-    const fresh = await rebuildCarouselCard({ ratio, t, index });
-    if (card.url) { try { URL.revokeObjectURL(card.url); } catch (e) {} }
-    carCards[carCards.findIndex((c) => c.index === index)] = fresh;
-    requestRender();
-    renderCarGrid();
-    if (note) note.textContent = `카드 ${index + 1}을 ${Number(fresh.t).toFixed(1)}초 지점으로 다시 찍었습니다.`;
-    emit('toast', { msg: `카드 ${index + 1} 시점을 ${Number(fresh.t).toFixed(1)}초로 바꿨습니다.`, type: 'ok' });
-  } catch (e) {
-    console.error(e);
-    if (note) note.textContent = '카드를 다시 찍지 못했습니다: ' + (e.message || e);
-    emit('toast', { msg: '카드 다시 찍기 실패: ' + (e.message || e), type: 'err' });
-  } finally {
-    carBusy = false;
-  }
+function fillEditor() {
+  const store = carStore();
+  if (!store || !carSelId) return;
+  const idx = store.cards.findIndex((c) => c.id === carSelId);
+  const card = store.cards[idx];
+  if (!card) return;
+  const st = { ...card.style };
+  $('#ceTitle', pane).textContent = `카드 ${idx + 1} 편집${idx === 0 ? ' (대표)' : ''}`;
+  const titleEl = $('#ceTitleInput', pane);
+  if (document.activeElement !== titleEl) titleEl.value = card.title || '';
+  const subEl = $('#ceSubInput', pane);
+  if (document.activeElement !== subEl) subEl.value = card.subtitle || '';
+  $('#ceY', pane).value = String(Math.round(Number(st.y) || 82));
+  $('#ceYVal', pane).textContent = `${Math.round(Number(st.y) || 82)}%`;
+  $('#ceSize', pane).value = String(Math.round(Number(st.size) || 66));
+  $('#ceSizeVal', pane).textContent = String(Math.round(Number(st.size) || 66));
+  $('#ceSubSize', pane).value = String(Math.round(Number(st.subSize) || 40));
+  $('#ceSubSizeVal', pane).textContent = String(Math.round(Number(st.subSize) || 40));
+  $('#ceColor', pane).value = st.color || '#ffffff';
+  $('#ceAccent', pane).value = st.accent || '#0b0d12';
+  $('#ceAccentOn', pane).checked = st.accentOn !== false;
+  $('#ceZoom', pane).value = String(Math.round(Number(card.crop && card.crop.zoom) || 100));
+  $('#ceZoomVal', pane).textContent = `${Math.round(Number(card.crop && card.crop.zoom) || 100)}%`;
+  $('#ceCropX', pane).value = String(Math.round(Number(card.crop && card.crop.x) || 0));
+  $('#ceCropXVal', pane).textContent = String(Math.round(Number(card.crop && card.crop.x) || 0));
+  $('#ceCropY', pane).value = String(Math.round(Number(card.crop && card.crop.y) || 0));
+  $('#ceCropYVal', pane).textContent = String(Math.round(Number(card.crop && card.crop.y) || 0));
+  fillPhotoSelect(card.assetId);
+  syncStyleButtons(card);
 }
 
-async function saveAllCards() {
-  if (!carCards.length) return;
-  const ratio = carCards.ratio || '4:5';
-  for (let i = 0; i < carCards.length; i++) {
-    const c = carCards[i];
-    if (!c.blob) continue;
-    downloadBlob(c.blob, carouselFileName(state.project.name, c.index + 1, ratio));
-    $('#carNote', pane).textContent = `저장 중… ${i + 1}/${carCards.length}`;
+function syncStyleButtons(card) {
+  const y = Number(card.style && card.style.y) || 82;
+  pane.querySelectorAll('#cePos [data-pos]').forEach((b) => b.classList.toggle('on', b.dataset.pos === yPreset(y)));
+}
+
+async function saveAllJpg() {
+  const store = carStore();
+  if (!store || !carRuntime.length) return;
+  for (let i = 0; i < carRuntime.length; i++) {
+    const c = carRuntime[i];
+    if (!c || !c.blob) continue;
+    downloadBlob(c.blob, carouselFileName(state.project.name, i + 1, store.ratio));
+    setCarNote(`저장 중… ${i + 1}/${carRuntime.length}`);
     await new Promise((r) => setTimeout(r, 420));
   }
-  $('#carNote', pane).textContent = `${carCards.length}장을 모두 저장했습니다. (브라우저가 여러 파일 다운로드를 물어보면 허용해 주세요)`;
-  emit('toast', { msg: `카드 ${carCards.length}장을 저장했습니다.`, type: 'ok' });
+  setCarNote(`${carRuntime.length}장을 모두 저장했습니다. (여러 파일 다운로드를 물어보면 허용해 주세요)`);
+  emit('toast', { msg: `카드 ${carRuntime.length}장을 저장했습니다.`, type: 'ok' });
 }
 
+async function saveZip() {
+  const store = carStore();
+  if (!store || !carRuntime.length) return;
+  try {
+    setCarNote('ZIP으로 묶는 중…');
+    const files = carRuntime.map((c, i) => ({
+      name: carouselFileName(state.project.name, i + 1, store.ratio),
+      blob: c && c.blob,
+    })).filter((f) => f.blob);
+    const zip = await buildZip(files);
+    downloadBlob(zip, `${safeName(state.project.name || 'reels')}_carousel_${store.ratio.replace(':', 'x')}.zip`);
+    const kb = Math.round(zip.size / 1024);
+    setCarNote(`ZIP 저장 완료 (${files.length}장, ${kb.toLocaleString()}KB)`);
+    emit('toast', { msg: `카드 ${files.length}장을 ZIP으로 저장했습니다.`, type: 'ok' });
+  } catch (e) {
+    console.error(e);
+    setCarNote('ZIP을 만들지 못했습니다: ' + (e.message || e));
+    emit('toast', { msg: 'ZIP 저장 실패: ' + (e.message || e), type: 'err' });
+  }
+}
+
+// ══ 5채널 캡션 (내보내기 탭) ═══════════════════════════
+function bindCaptions() {
+  const urlEl = $('#exCapUrl', pane);
+  urlEl.addEventListener('change', () => {
+    const url = normalizeBlogUrl(urlEl.value);
+    if (url) { urlEl.value = url; saveCaptionState({ url }); }
+  });
+  $('#exCapFetch', pane).addEventListener('click', () => fetchBlogInExport());
+  $('#exCapGen', pane).addEventListener('click', () => generateCaptionsInExport());
+
+  const out = $('#exCapOut', pane);
+  out.addEventListener('input', (e) => {
+    const id = e.target.dataset.captext;
+    if (!id) return;
+    const cap = loadCaptionState();
+    cap.captions[id] = e.target.value;
+    clearTimeout(capSaveTimer);
+    capSaveTimer = setTimeout(() => saveCaptionState({ captions: cap.captions }), 500);
+    updateCapFoot(id);
+  });
+  out.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-capcopy]');
+    if (!btn) return;
+    const id = btn.dataset.capcopy;
+    const ta = out.querySelector(`[data-captext="${id}"]`);
+    const text = ta ? ta.value : '';
+    if (!text.trim()) { capStatus('이 채널 캡션이 비었습니다.', 'err'); return; }
+    const ok = await copyPlain(text);
+    capStatus(ok ? `${(CAPTION_CHANNELS.find((c) => c.id === id) || {}).label || ''} 캡션을 복사했습니다.` : '복사가 막혔습니다. 칸을 눌러 직접 복사해 주세요.', ok ? 'ok' : 'warn');
+  });
+  renderExCaptions();
+}
+
+function capStatus(msg, type = '') {
+  const box = $('#exCapStatus', pane);
+  if (!box) return;
+  box.classList.remove('hidden', 'ok', 'err', 'warn');
+  if (!msg) { box.classList.add('hidden'); box.textContent = ''; return; }
+  if (type) box.classList.add(type);
+  box.textContent = msg;
+}
+
+function renderExCaptions() {
+  const out = $('#exCapOut', pane);
+  if (!out) return;
+  const active = document.activeElement;
+  if (active && active.matches && active.matches('[data-captext]')) return; // 입력 중이면 건드리지 않음
+  const cap = loadCaptionState();
+  const urlEl = $('#exCapUrl', pane);
+  if (urlEl && document.activeElement !== urlEl) urlEl.value = cap.url || '';
+  out.innerHTML = CAPTION_CHANNELS.map((ch) => {
+    const text = cap.captions[ch.id] || '';
+    return `<div class="cap-card" data-capcard="${ch.id}">
+      <div class="cap-head">
+        <b>${ch.icon} ${ch.label}</b>
+        <span class="grow"></span>
+        <button class="btn tiny" data-capcopy="${ch.id}" type="button">📋 복사</button>
+      </div>
+      <div class="cap-hint">${escapeHtml(ch.hint)}</div>
+      <textarea class="cap-text" data-captext="${ch.id}" rows="4" placeholder="아직 캡션이 없습니다. 위에서 만들거나 AI 세팅 탭에서 만들면 채워집니다.">${escapeHtml(text)}</textarea>
+      <div class="cap-foot"><span data-capcount="${ch.id}"></span><span data-capwarn="${ch.id}"></span></div>
+    </div>`;
+  }).join('');
+  for (const ch of CAPTION_CHANNELS) updateCapFoot(ch.id);
+}
+
+function updateCapFoot(id) {
+  const out = $('#exCapOut', pane);
+  if (!out) return;
+  const ta = out.querySelector(`[data-captext="${id}"]`);
+  const count = out.querySelector(`[data-capcount="${id}"]`);
+  const warn = out.querySelector(`[data-capwarn="${id}"]`);
+  const text = ta ? ta.value : '';
+  if (count) count.textContent = text.trim() ? `${text.trim().length}자` : '';
+  if (!warn) return;
+  if (id === 'naverClip' && text.trim()) {
+    const c = checkNaverClipCaption(text);
+    warn.textContent = c.ok
+      ? `해시태그 ${c.tags}개 · 유도 문구 ✓`
+      : `해시태그 ${c.tags}개${c.hasChallenge && c.hasCreator ? '' : ' — 고정 2개 누락'}${c.hasCta ? '' : ' · 유도 문구 없음'} (총 5개 권장)`;
+    warn.className = c.ok ? 'ok' : 'warn';
+  } else {
+    warn.textContent = '';
+    warn.className = '';
+  }
+}
+
+async function fetchBlogInExport() {
+  if (exCapBusy) return;
+  const input = $('#exCapUrl', pane);
+  const url = normalizeBlogUrl(input.value);
+  if (!url) { capStatus('블로그 주소를 먼저 입력해 주세요.', 'err'); return; }
+  input.value = url;
+  const btn = $('#exCapFetch', pane);
+  exCapBusy = true;
+  btn.disabled = true;
+  btn.textContent = '가져오는 중…';
+  capStatus('글 제목·본문·사진을 가져오는 중… (최대 40초)', 'warn');
+  try {
+    const { post, images, via } = await loadBlogIntoProject(url, {
+      maxImages: 8,
+      onProgress: (msg) => capStatus(msg, 'warn'),
+    });
+    renderExCaptions();
+    capStatus(`가져왔습니다 — “${post.title}” · 사진 ${images.length}장 · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, 'ok');
+    emit('project', { panels: ['ai', 'export'] });
+  } catch (e) {
+    capStatus(`${e.message}${e.detail ? ` [${e.detail}]` : ''}`, 'err');
+  } finally {
+    exCapBusy = false;
+    btn.disabled = false;
+    btn.textContent = '불러오기';
+  }
+}
+
+let exModels = null;
+async function generateCaptionsInExport() {
+  const cap = loadCaptionState();
+  const body = (cap.body || '').trim();
+  if (!body || body.length < 40) { capStatus('본문이 없습니다. 위에서 [불러오기]를 누르거나 AI 세팅 탭에서 본문을 넣어 주세요.', 'err'); return; }
+  if (exCapBusy) return;
+  const btn = $('#exCapGen', pane);
+  exCapBusy = true;
+  btn.disabled = true;
+  capStatus('5채널 캡션을 만드는 중…', 'warn');
+  const keywords = extractKeywords({ title: cap.title, body, n: 3 });
+  try {
+    const s = loadAiSettings();
+    let caps = null;
+    if (s.apiKey) {
+      try {
+        let model = (exModels && exModels.text) || s.model;
+        if (!exModels) {
+          const ids = await listModels(s.apiKey);
+          exModels = pickModels(ids, s);
+          model = exModels.text || model;
+        }
+        capStatus(`Gemini(${model})가 5채널 캡션을 만드는 중… (10~30초)`, 'warn');
+        const raw = await askGeminiText({
+          apiKey: s.apiKey,
+          model,
+          prompt: buildCaptionPrompt(body, { url: cap.url, title: cap.title, keywords }),
+        });
+        caps = parseCaptions(raw, { body, title: cap.title, keywords });
+      } catch (e) {
+        capStatus('Gemini 실패 — 블로그 본문으로 기본 캡션을 만듭니다. (' + (e.message || e) + ')', 'warn');
+      }
+    }
+    if (!caps) {
+      const local = buildLocalCaptions({ title: cap.title, body, hashtags: [], url: cap.url });
+      caps = parseCaptions(JSON.stringify(local), { body, title: cap.title, keywords: local.keywords });
+    }
+    const merged = { ...cap.captions, ...caps };
+    saveCaptionState({ captions: merged });
+    renderExCaptions();
+    capStatus(`5채널 캡션 완료 — 네이버 클립은 고정 태그 2개 + 핵심 태그 3개로 맞췄습니다.`, 'ok');
+    emit('project', { panels: ['ai'] });
+  } catch (e) {
+    capStatus(e.message || '캡션을 만들지 못했습니다.', 'err');
+  } finally {
+    exCapBusy = false;
+    btn.disabled = false;
+  }
+}
+
+async function copyPlain(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e2) { return false; }
+  }
+}
+
+// ══ 새로고침 ════════════════════════════════════════════
 export function refreshExportPanel() {
   if (!pane || !state.project) return;
   syncRes();
   syncCarRatio();
   syncCarCount();
   renderSpecs();
+  renderExCaptions();
+  syncCarUI();
+  // 탭이 보일 때, 저장된 카드가 아직 안 그려졌으면 이어서 그립니다.
+  if (carStore() && !carRuntime.length && pane.offsetParent !== null) renderAll({ force: false });
+}
+
+/** AI 세팅 탭에서 카드를 만들었을 때 내보내기 탭이 이어서 그립니다. */
+export async function reloadCarouselFromProject() {
+  if (!pane) return;
+  const store = carStore();
+  if (!store) { carRuntime = []; carSig = ''; syncCarUI(); return; }
+  state.project.export.carouselRatio = store.ratio;
+  state.project.export.carouselCount = store.cards.length;
+  syncCarRatio();
+  syncCarCount();
+  carSelId = carSelId || (store.cards[0] && store.cards[0].id) || '';
+  await renderAll({ force: true });
 }
