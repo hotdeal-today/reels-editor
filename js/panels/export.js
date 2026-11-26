@@ -40,21 +40,6 @@ export function initExportPanel(el) {
       <p>사진·영상·음성 모두 이 브라우저 안에서만 처리되고, 서버로는 아무것도 전송되지 않습니다.</p>
     </div>
 
-    <div class="sec" data-sec="cap">
-      <div class="sec-head">📝 블로그 URL · 5채널 캡션 <span class="count">AI 세팅과 같은 상태</span></div>
-      <div class="sec-note" style="margin:0 0 7px">AI 세팅 탭에서 블로그를 불러왔으면 URL·본문이 이미 채워져 있습니다. 여기서 다시 불러오거나 다시 만들어도 됩니다.</div>
-      <div class="row">
-        <label>블로그 URL</label>
-        <input type="text" class="grow" id="exCapUrl" placeholder="https://blog.naver.com/…" spellcheck="false" autocomplete="off">
-        <button class="btn tiny" id="exCapFetch" type="button">불러오기</button>
-      </div>
-      <div class="row" style="gap:6px">
-        <button class="btn sm primary grow" id="exCapGen" type="button">✨ 5채널 캡션 만들기</button>
-      </div>
-      <div class="ai-status hidden" id="exCapStatus"></div>
-      <div class="cap-out" id="exCapOut"></div>
-    </div>
-
     <div class="sec">
       <div class="sec-head">해상도</div>
       <div class="seg-btns" id="resBtns">
@@ -95,6 +80,11 @@ export function initExportPanel(el) {
       <div class="seg-btns" id="carRatio" style="margin-bottom:8px">
         <button type="button" data-car-ratio="4:5">4:5 피드 (1080×1350)</button>
         <button type="button" data-car-ratio="9:16">9:16 세로 (1080×1920)</button>
+      </div>
+      <div class="row" style="gap:6px">
+        <label>블로그 URL</label>
+        <input type="text" class="grow" id="carBlogUrl" placeholder="https://blog.naver.com/…" spellcheck="false" autocomplete="off">
+        <button class="btn tiny" id="carBlogLoad" type="button">불러오기</button>
       </div>
       <div class="row" style="gap:6px">
         <button class="btn primary grow" id="carFromClips" type="button">⚡ 지금 컷으로 카드 만들기</button>
@@ -156,6 +146,21 @@ export function initExportPanel(el) {
         <button class="btn grow" id="carSaveAll" type="button" style="display:none">📥 JPG 모두 저장</button>
         <button class="btn grow" id="carZip" type="button" style="display:none">🗜 ZIP으로 저장</button>
       </div>
+    </div>
+
+    <div class="sec" data-sec="cap">
+      <div class="sec-head">📝 블로그 URL · 5채널 캡션 <span class="count">AI 세팅과 같은 상태</span></div>
+      <div class="sec-note" style="margin:0 0 7px">AI 세팅 탭에서 블로그를 불러왔으면 URL·본문이 이미 채워져 있습니다. 여기서 다시 불러오거나 다시 만들어도 됩니다.</div>
+      <div class="row">
+        <label>블로그 URL</label>
+        <input type="text" class="grow" id="exCapUrl" placeholder="https://blog.naver.com/…" spellcheck="false" autocomplete="off">
+        <button class="btn tiny" id="exCapFetch" type="button">불러오기</button>
+      </div>
+      <div class="row" style="gap:6px">
+        <button class="btn sm primary grow" id="exCapGen" type="button">✨ 5채널 캡션 만들기</button>
+      </div>
+      <div class="ai-status hidden" id="exCapStatus"></div>
+      <div class="cap-out" id="exCapOut"></div>
     </div>
 
     <div class="sec">
@@ -361,6 +366,12 @@ function bindCarousel() {
   });
   $('#carFromClips', pane).addEventListener('click', () => buildFromClips());
   $('#carFromBlog', pane).addEventListener('click', () => buildFromBlog());
+  $('#carBlogLoad', pane).addEventListener('click', () => {
+    const u = ($('#carBlogUrl', pane).value || '').trim();
+    if (!u) { emit('toast', { msg: '블로그 주소를 먼저 입력해 주세요.', type: 'err' }); return; }
+    $('#exCapUrl', pane).value = u;
+    fetchBlogInExport();
+  });
   $('#carSaveAll', pane).addEventListener('click', () => saveAllJpg());
   $('#carZip', pane).addEventListener('click', () => saveZip());
   $('#carGrid', pane).addEventListener('click', (e) => {
@@ -898,6 +909,8 @@ async function fetchBlogInExport() {
   const url = normalizeBlogUrl(input.value);
   if (!url) { capStatus('블로그 주소를 먼저 입력해 주세요.', 'err'); return; }
   input.value = url;
+  const cu = $('#carBlogUrl', pane);
+  if (cu) cu.value = url;
   const btn = $('#exCapFetch', pane);
   exCapBusy = true;
   btn.disabled = true;
@@ -1014,6 +1027,11 @@ export function refreshExportPanel() {
   renderSpecs();
   renderExCaptions();
   syncCarUI();
+  const bUrl = $('#carBlogUrl', pane);
+  if (bUrl) {
+    const blog = loadBlogStore();
+    if (blog && blog.url && !bUrl.value) bUrl.value = blog.url;
+  }
   // 탭이 보일 때, 저장된 카드가 아직 안 그려졌으면 이어서 그립니다.
   if (carStore() && !carRuntime.length && pane.offsetParent !== null) renderAll({ force: false });
 }
