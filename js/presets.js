@@ -22,10 +22,19 @@ export const PRESETS = [
     id: 'pink', name: '핑크 배지', sample: '핑크',
     style: { color: '#ff7aa8', bg: { on: true, color: '#2a0f1a', opacity: 82, radius: 99, padX: 24, padY: 12 }, stroke: { on: false }, shadow: { on: true, color: '#000000', opacity: 50, x: 0, y: 4, blur: 12 } },
   },
+  {
+    id: 'ref', name: '레퍼런스 화이트', sample: '화이트',
+    style: { color: '#ffffff', bg: { on: false }, stroke: { on: true, color: '#0b0b0b', width: 6 }, shadow: { on: true, color: '#000000', opacity: 45, x: 0, y: 4, blur: 10 } },
+  },
+  {
+    id: 'refglow', name: '레퍼런스 시안 발광', sample: '시안',
+    style: { color: '#ffffff', bg: { on: false }, stroke: { on: true, color: '#127b96', width: 6 }, shadow: { on: true, color: '#7fe3ff', opacity: 90, x: 0, y: 0, blur: 24 } },
+  },
 ];
 
 /** 제목/배지/자막에 어울리는 프리셋 조합 */
 export const DESIGN_SETS = {
+  ref: { label: '레퍼런스 화이트 세트', title: 'ref', badge: 'refglow', subtitle: 'ref' },
   neon: { label: '네온 옐로우 세트', title: 'neon', badge: 'pink', subtitle: 'blackbox' },
   clean: { label: '깔끔 화이트 세트', title: 'clean', badge: 'mint', subtitle: 'clean' },
   bold: { label: '블랙박스 임팩트 세트', title: 'blackbox', badge: 'neon', subtitle: 'blackbox' },

@@ -11,6 +11,7 @@ import {
   buildCaptionPrompt, parseCaptions, checkNaverClipCaption, normalizeBlogUrl,
 } from '../captions.js';
 import { DESIGN_SETS } from '../presets.js';
+import { DEFAULT_COPY } from '../formula.js';
 import {
   geminiTts, addVoiceClip, removeVoiceClip, voiceClips, previewSpeech, stopSpeech,
   localVoices, speechSupported, recordVoice, voiceAssetName,
@@ -87,6 +88,27 @@ export function initAiPanel(el) {
         </div>
         <div class="row">
           <label class="switch"><input type="checkbox" id="aiUseName"> 제목에 프로젝트 이름</label>
+        </div>
+        <div class="row">
+          <label>자막 호흡</label>
+          <select class="grow" id="aiTempo">
+            <option value="steady">여유 (2~3초에 한 줄)</option>
+            <option value="ref">레퍼런스 (1.2~1.8초에 한 줄)</option>
+          </select>
+        </div>
+        <div class="row" style="gap:8px;align-items:flex-start">
+          <label>카피 틀</label>
+          <div class="grow">
+            <textarea id="aiCopyLines" class="ai-textarea" rows="5" placeholder="한 줄에 하나씩. {t}는 주제·프로젝트 이름으로 바뀝니다. 비우면 기본 틀(문제 제기 → 전환 → 해결 → 정보 → CTA)을 씁니다."></textarea>
+            <div class="row" style="gap:6px;margin-top:5px">
+              <button class="btn tiny ghost" id="aiCopyDefault" type="button">기본 틀 넣기</button>
+              <button class="btn tiny ghost" id="aiCopyClear" type="button">비우기</button>
+            </div>
+          </div>
+        </div>
+        <div class="sec-note" style="margin:0 0 7px">
+          레퍼런스 릴스 2편(@home_tembbly·@homterior_pick) 공식: <b>문제 제기 → “~하지 마세요” → 전환 → 기능(동작→결과) → 정보 → CTA → 엔드카드 2줄</b>.
+          한 자막 4~14자, 해요체 구어체, 1컷만 상단 후킹·2컷부터는 하단 세이프존에 놓입니다.
         </div>
         <button class="btn primary block ai-big" id="aiOneClick" type="button">⚡ 원클릭 자동 배치</button>
         <div class="sec-note" id="aiOneClickNote" style="margin:6px 0 0">지금 타임라인의 구간·효과음을 새로 배치합니다. 자막 글자는 유지되지 않으니, 글자를 이미 썼다면 먼저 <b>💾 프로젝트 저장</b>을 해 두세요.</div>
@@ -191,6 +213,8 @@ export function initAiPanel(el) {
 
   // 값 채우기
   $('#aiDesignSel', pane).value = s.design || 'neon';  $('#aiImageDur', pane).value = String(s.imageDur || 2.6);
+  $('#aiTempo', pane).value = s.tempo || 'steady';
+  $('#aiCopyLines', pane).value = s.copyLines || '';
   $('#aiUseSfx', pane).checked = s.useSfx !== false;
   $('#aiUseName', pane).checked = s.useName !== false;
   $('#aiTopic', pane).value = s.topic || '';
@@ -220,6 +244,8 @@ function saveSettingsFromUI() {
   saveAiSettings({
     design: $('#aiDesignSel', pane).value,
     imageDur: Number($('#aiImageDur', pane).value) || 2.6,
+    tempo: $('#aiTempo', pane).value || 'steady',
+    copyLines: $('#aiCopyLines', pane).value || '',
     useSfx: $('#aiUseSfx', pane).checked,
     useName: $('#aiUseName', pane).checked,
     topic: $('#aiTopic', pane).value.trim(),
@@ -397,11 +423,12 @@ async function syncNarrationAfterLayout() {
 
 function bindEvents() {
   // 설정 변경 저장
-  ['aiDesignSel', 'aiImageDur', 'aiUseSfx', 'aiUseName', 'aiTopic', 'ttsVoice', 'aiAutoTts'].forEach((id) => {
+  ['aiDesignSel', 'aiImageDur', 'aiTempo', 'aiCopyLines', 'aiUseSfx', 'aiUseName', 'aiTopic', 'ttsVoice', 'aiAutoTts'].forEach((id) => {
     const el = $(`#${id}`, pane);
     if (!el) return;
     el.addEventListener('change', saveSettingsFromUI);
     if (el.tagName === 'INPUT' && el.type === 'text') el.addEventListener('blur', saveSettingsFromUI);
+    if (el.tagName === 'TEXTAREA') el.addEventListener('blur', saveSettingsFromUI);
   });
 
   $('#aiOneClick', pane).addEventListener('click', async () => {
@@ -410,7 +437,7 @@ function bindEvents() {
     const hasText = (state.project.segments || []).some((sg) => (sg.title || sg.badge || sg.subtitle || '').trim());
     if (hasText && !window.confirm('기존 구간·자막·효과음이 새로 배치됩니다(지금 쓴 글자는 사라집니다). 계속할까요?\n\n글자를 지키려면 [취소] 후 💾 .json 저장을 먼저 해 두세요.')) return;
     try {
-      const res = autoLayout({ design: s.design, imageDur: s.imageDur, useSfx: s.useSfx, useName: s.useName });
+      const res = autoLayout({ design: s.design, imageDur: s.imageDur, useSfx: s.useSfx, useName: s.useName, tempo: s.tempo, copyLines: s.copyLines });
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       const sub = res.subtitles || {};
       const subTxt = sub.count ? ` · 자막 ${sub.count}개(0~${res.duration}초, 가장 큰 빈 구간 ${sub.maxGap}초)` : '';
@@ -422,10 +449,22 @@ function bindEvents() {
     }
   });
 
+  $('#aiCopyDefault', pane).addEventListener('click', () => {
+    $('#aiCopyLines', pane).value = DEFAULT_COPY.join('\n');
+    saveSettingsFromUI();
+    emit('toast', { msg: '레퍼런스 공식 기본 카피 틀을 넣었습니다. 문장은 자유롭게 고치세요.', type: 'ok' });
+  });
+
+  $('#aiCopyClear', pane).addEventListener('click', () => {
+    $('#aiCopyLines', pane).value = '';
+    saveSettingsFromUI();
+    emit('toast', { msg: '카피 틀을 비웠습니다(비우면 기본 틀을 씁니다).' });
+  });
+
   // 프롬프트
   $('#aiCopyPrompt', pane).addEventListener('click', async () => {
     saveSettingsFromUI();
-    const text = buildChatPrompt($('#aiTopic', pane).value.trim());
+    const text = buildChatPrompt($('#aiTopic', pane).value.trim(), loadAiSettings().tempo);
     const ta = $('#aiPromptText', pane);
     if (ta) { ta.value = text; }
     try {
@@ -446,7 +485,7 @@ function bindEvents() {
     const ta = $('#aiPromptText', pane);
     if (!ta) return;
     if (ta.classList.contains('hidden')) {
-      ta.value = buildChatPrompt($('#aiTopic', pane).value.trim());
+      ta.value = buildChatPrompt($('#aiTopic', pane).value.trim(), loadAiSettings().tempo);
       ta.classList.remove('hidden');
     } else {
       ta.classList.add('hidden');
@@ -537,7 +576,7 @@ function bindEvents() {
       if (!frames.length) throw new Error('사진·영상 프레임을 읽지 못했습니다. 파일을 다시 올려 주세요.');
       const videos = new Set(frames.filter((f) => /^영상/.test(f.label || '')).map((f) => (f.label || '').split(' ')[1])).size;
       status(`Gemini(${model})가 프레임 ${frames.length}장${videos ? `(영상 ${videos}개 × 2~3프레임)` : ''}을 보고 세팅을 만드는 중… (10~30초)`, 'warn');
-      const { plan } = await askGemini({ apiKey: s.apiKey, model, prompt: buildPrompt($('#aiTopic', pane).value.trim()), frames });
+      const { plan } = await askGemini({ apiKey: s.apiKey, model, prompt: buildPrompt($('#aiTopic', pane).value.trim(), s.tempo), frames });
       const res = applyPlan(plan);
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       status(`AI 세팅 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개`, 'ok');

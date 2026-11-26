@@ -26,7 +26,7 @@ export function defaultStyle(key) {
     };
   }
   return {
-    ...base, size: 50, weight: 700, y: 1610,
+    ...base, size: 50, weight: 700, y: 1420,
     bg: { on: false, color: '#000000', opacity: 65, radius: 12, padX: 22, padY: 10 },
     shadow: { on: true, color: '#000000', opacity: 60, x: 0, y: 4, blur: 12 },
   };

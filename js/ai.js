@@ -5,6 +5,10 @@
 import { state, totalDuration, clipDur, clipStart, persist, mixDirty, getAsset } from './state.js';
 import { imageFor, videoFor, seekVideo, waitVideoReady } from './media.js';
 import { DESIGN_SETS, presetById } from './presets.js';
+import {
+  TEMPOS, tempoById, buildBeats, copyLinesFromText, layoutSegments, applyEndCard,
+  endCardLines, hookRulesText, placementRulesText, CAPTION_LIMIT,
+} from './formula.js';
 import { uid, clamp, round } from './util.js';
 
 // ── 설정 저장 (localStorage · 서버 전송 없음) ─────────────
@@ -18,6 +22,8 @@ export const DEFAULT_AI_SETTINGS = {
   topic: '',
   design: 'neon',
   imageDur: 2.6,
+  tempo: 'steady',   // steady(2~3초) | ref(1.2~1.8초 · 레퍼런스 실측)
+  copyLines: '',     // 원클릭 카피 틀(줄 단위). 비우면 기본 틀
   useSfx: true,
   useName: true,
   // 원클릭·붙여넣기·Gemini 세팅 뒤 자막과 1:1로 나레이션(TTS)까지 만들지
@@ -186,18 +192,25 @@ export function clipSummary() {
   }));
 }
 
-// ── 자막 박자(2~3초 간격) ──────────────────────────────
-// 예나님 기준: 자막은 2~3초마다 한 줄, 0초부터 끝까지 빈틈없이.
+// ── 자막 박자 ─────────────────────────────────────────
+// 예나님 기준(steady): 자막은 2~3초마다 한 줄, 0초부터 끝까지 빈틈없이.
 // 4초 → 2개, 6초 → 3개, 13초 → 5~6개, 18초 → 7~9개.
+// 레퍼런스(ref): 실측 0.8~1.5초에 한 줄(@home_tembbly 22.5초/22개, @homterior_pick 28.4초/27개).
 export const BEAT = { min: 2.0, ideal: 2.4, max: 3.0 };
 
+export function beatSpec(tempo) {
+  const t = tempoById(tempo);
+  return { min: t.min, ideal: t.ideal, max: t.max };
+}
+
 /** 전체 길이에 맞는 자막 개수(박자 수) */
-export function beatCountFor(dur) {
+export function beatCountFor(dur, tempo) {
+  const beat = beatSpec(tempo);
   const d = Number(dur) || 0;
   if (d <= 0.4) return 1;
-  let n = Math.round(d / BEAT.ideal);
-  n = Math.max(n, Math.ceil(d / BEAT.max));
-  n = Math.min(n, Math.max(1, Math.floor(d / BEAT.min)));
+  let n = Math.round(d / beat.ideal);
+  n = Math.max(n, Math.ceil(d / beat.max));
+  n = Math.min(n, Math.max(1, Math.floor(d / beat.min)));
   return clamp(n, 1, 120);
 }
 
@@ -234,9 +247,9 @@ function splitInto2(text) {
  * · 자막이 모자라면 가장 긴 자막을 단어 단위로 쪼개 개수를 채우고,
  *   경계를 전체 길이에 고르게 다시 잡습니다(클립 길이가 바뀜 뒤 눌러도 최신 totalDuration 기준).
  */
-export function ensureSubtitleBeats(segs, dur) {
+export function ensureSubtitleBeats(segs, dur, tempo) {
   const d = Math.max(0.2, Number(dur) || 0);
-  const target = beatCountFor(d);
+  const target = beatCountFor(d, tempo);
   const clean = (segs || [])
     .filter((s) => s && Number(s.end) > Number(s.start) + 0.05)
     .map((s) => ({ ...s }));
@@ -310,41 +323,48 @@ export function subtitleStats(segs, dur) {
 const SCHEMA = `{
   "title": "릴스 제목 (12자 이내, 후킹)",
   "badge": "배지 (6자 이내, 예: BEST · 1+1 · 무료 · 총정리)",
-  "design": "neon | clean | bold 중 하나",
+  "design": "ref | neon | clean | bold 중 하나",
   "segments": [
-    { "start": 0, "end": 3.0, "title": "이 구간 제목(선택)", "badge": "이 구간 배지(선택)", "subtitle": "이 구간 자막(18자 이내)", "motion": "zoomIn | zoomOut | none" }
+    { "start": 0, "end": 2.0, "title": "이 구간 제목(선택)", "badge": "이 구간 배지(선택)", "subtitle": "이 구간 자막(4~14자)", "motion": "zoomIn | zoomOut | none" }
   ],
+  "endcard": [ "윗줄 12자 이내 — 제품명·한 줄 요약", "아랫줄 — 1컷 후킹 그대로 반복" ],
   "hook": "마지막 클릭 유도 멘트",
   "sfx": [ { "type": "jjan | pop | swish | dingdong | ddoong | tadak | beep | shutter", "at": 0.0 } ]
 }`;
 
-function contextLine() {
+function contextLine(tempo) {
   const summary = clipSummary();
   const dur = round(totalDuration(), 1);
   const lines = summary.map((c) => `${c.index}번 ${c.kind === 'video' ? '영상' : '사진'} ${c.length}초`).join(' · ');
-  const beats = beatCountFor(dur);
-  return `전체 길이 ${dur}초, 클립 ${summary.length}개 (${lines || '없음'}). 자막은 0초부터 ${dur}초까지 빈틈없이 2~3초 간격으로 약 ${beats}개.`;
+  const beats = beatCountFor(dur, tempo);
+  const spec = beatSpec(tempo);
+  const first = summary[0] ? `${summary[0].length}초` : '없음';
+  return `전체 길이 ${dur}초, 클립 ${summary.length}개 (${lines || '없음'}), 1컷 ${first}. 자막은 0초부터 ${dur}초까지 빈틈없이 ${spec.min}~${spec.max}초 간격으로 약 ${beats}개.`;
 }
 
-export function buildPrompt(topic) {
+export function buildPrompt(topic, tempo) {
   return [
-    '너는 한국 여행·리빙 블로그 운영자가 쓰는 9:16 세로 릴스(인스타 릴스·네이버 클립) 편집자다.',
+    '너는 한국 여행·리빙 블로그 운영자가 쓰는 9:16 세로 릴스(인스타 릴스·네이버 클립) 자막 작가다.',
     '첨부한 사진/영상 프레임을 보고, 아래 JSON 스키마에 맞는 편집 세팅을 하나만 출력한다.',
     '',
-    '[규칙]',
+    hookRulesText(),
+    '',
+    '[출력 규칙]',
     '- 한국어로 쓴다. 설명·인사·코드블록 없이 JSON 객체 하나만 출력한다.',
-    '- title: 12자 이내, 호기심을 자극하는 후킹 제목. 숫자·지역명을 넣으면 좋다.',
+    '- title: 12자 이내 후킹(숫자·지명 환영). 1컷 상단에 크게 뜨는 글자다.',
     '- badge: 6자 이내 짧은 강조 (BEST, 1+1, 무료, 총정리, 필수템 등).',
-    '- segments: 전체 길이에 맞춰 2~3초 간격으로 자막을 쪼개서 만든다 (4초면 2개, 6초면 3개, 13초면 5~6개, 18초면 7~9개). start/end는 초 단위 숫자이고 0부터 시작해 전체 길이 끝까지 빈틈없이 덮는다(중간에 빈 구간을 두지 않는다).',
-    '- subtitle: 시청자가 자막만 읽어도 이해되는 한 줄, 18자 이내, 구어체. 정보(가격·시간·위치·주의점)를 담는다.',
-    '- 같은 자막을 두 구간에 반복하지 않는다. 영상은 시작·중간·끝 프레임을 함께 보내니 장면이 바뀌는 지점을 자막에 반영한다.',
-    '- 마지막 구간의 자막은 hook과 같게 두고, hook은 "자세한 내용은 본문에서 확인하세요👇" 같은 클릭 유도 문장으로 쓴다.',
+    `- subtitle: 한 줄 4~${CAPTION_LIMIT}자, 1줄, 해요체 구어체. 두 정보를 한 줄에 넣지 않는다.`,
+    '- segments: 0초부터 전체 길이 끝까지 빈틈없이. start/end는 초 단위 숫자이고 서로 겹치거나 빈 구간을 두지 않는다.',
+    '- 첫 구간(1컷) 자막은 문제 제기 한 줄, 바로 다음 구간은 "~하지 마세요" 금지 명령 한 줄로 후킹을 만든다.',
+    '- 화면에서 확인되는 사실(가격·기종·색·개수·거리)만 쓴다. 프레임에서 확인되지 않은 수치·효능은 쓰지 않는다.',
+    '- 마지막 구간의 자막은 hook과 같게 두고, hook은 댓글 유도("\'나도\' 남겨주세요") 또는 블로그 유도("자세한 내용은 본문에서 확인하세요👇") 중 하나.',
+    '- endcard: ["윗줄 12자 이내 — 제품명·한 줄 요약", "아랫줄 — 1컷 후킹 그대로 반복"]. 마지막 구간을 이 2줄 카드로 만든다.',
     '- motion: 사진에는 zoomIn/zoomOut을 번갈아, 영상에는 none을 권장.',
     '- sfx: 최대 5개. 첫 등장 jjan, 화면 전환 swish, 핵심 강조 pop/ddingdong 중에서 at(초)과 함께 제안.',
-    '- design: 밝고 정보성인 릴스는 neon, 깔끔한 제품컷은 clean, 임팩트가 필요하면 bold.',
+    '- design: 흰 글씨+검정 외곽선 레퍼런스 톤은 ref, 밝고 정보성 글은 neon, 깔끔한 제품컷은 clean, 임팩트가 필요하면 bold.',
     '',
     '[지금 타임라인]',
-    contextLine(),
+    contextLine(tempo),
     topic ? `[주제] ${topic}` : '[주제] (첨부한 사진/영상에서 추론)',
     '',
     '[출력 스키마]',
@@ -353,19 +373,22 @@ export function buildPrompt(topic) {
 }
 
 /** 채팅형 무료 AI(ChatGPT·Gemini)에 사진과 함께 붙여넣을 프롬프트 */
-export function buildChatPrompt(topic) {
+export function buildChatPrompt(topic, tempo) {
   return [
     '아래는 내가 만드는 9:16 세로 릴스(인스타 릴스·네이버 클립)다. 첨부한 사진/영상을 보고 편집 세팅을 JSON으로만 답해줘.',
     '',
+    hookRulesText(),
+    '',
     '[상황]',
-    contextLine(),
+    contextLine(tempo),
     topic ? `[주제] ${topic}` : '[주제] 첨부한 사진을 보고 네가 추론',
     '',
     '[요청]',
-    '1) 제목·배지: 첫 3초에 시선을 끄는 한국어 문구',
-    '2) 구간별 자막: 0초부터 전체 길이 끝까지 빈틈없이, 2~3초 간격으로 끊어서 (4초면 2개, 6초면 3개, 13초면 5~6개, 18초면 7~9개). 각 자막은 18자 이내 구어체 한 줄, 정보 포함',
-    '3) 마지막 멘트: "자세한 내용은 본문에서 확인하세요👇" 같은 클릭 유도 문장',
+    '1) 제목·배지: 첫 3초에 시선을 끄는 한국어 문구(제목 12자, 배지 6자 이내)',
+    `2) 구간별 자막: 0초부터 전체 길이 끝까지 빈틈없이, 4~${CAPTION_LIMIT}자 한 줄, 해요체 구어체. 문제 제기 → 금지 명령 → 전환 → 기능(동작→결과) → 정보 → CTA 순서`,
+    '3) 마무리: endcard 2줄(윗줄 제품명·요약, 아랫줄 1컷 후킹 반복) + hook은 댓글 유도 또는 블로그 유도 한 문장',
     '4) 효과음 추천: 종류 + 넣을 초 (jjan=짠, pop=뽕, swish=쉭, dingdong=딩동, ddoong=두둥, tadak=타닥, beep=삐, shutter=찰칵)',
+    '5) design: 흰 글씨+검정 외곽선 레퍼런스 톤이면 ref',
     '',
     '[출력 형식] 코드블록 없이 아래 모양의 JSON 하나만. start/end는 초 단위 숫자.',
     SCHEMA,
@@ -531,9 +554,16 @@ export function normalizePlan(obj) {
     badge: clean(pick(src, ['badge', '배지', 'label', 'tag'])),
     hook: clean(pick(src, ['hook', 'lastHook', 'last_hook', 'ending', 'cta', '마지막멘트', '마지막_멘트', 'hooking', '멘트', 'outro'])),
     design: clean(pick(src, ['design', '디자인', 'style', 'preset'])).toLowerCase(),
+    endcard: [],
     segments: [],
     sfx: [],
   };
+
+  const ecRaw = pick(src, ['endcard', 'end_card', 'endCard', '엔드카드', 'closing', 'endLines', 'end_lines']);
+  plan.endcard = (Array.isArray(ecRaw) ? ecRaw : String(ecRaw || '').split(/\n|\/|·/))
+    .map((x) => clean(typeof x === 'string' ? x : (x && (x.text || x.title || x.line)) || ''))
+    .filter(Boolean)
+    .slice(0, 2);
 
   let segs = src.segments || src.cuts || src.scenes || src.구간 || src.subtitles || src.captions || src.lines;
   if (typeof segs === 'string') segs = segs.split(/\n+/);
@@ -614,41 +644,40 @@ export function autoLayout(opts = {}) {
   });
 
   const dur = totalDuration();
+  const tempo = s.tempo || 'steady';
 
-  // 2) 자막 박자 — 클립 개수가 아니라 전체 길이 기준 1.5~2.3초 간격, 0초부터 끝까지 빈틈없이
-  const beats = beatCountFor(dur);
+  // 2) 자막 박자 — 클립 개수가 아니라 전체 길이 기준, 0초부터 끝까지 빈틈없이
+  const beats = beatCountFor(dur, tempo);
   const step = dur / Math.max(1, beats);
   const name = clean(p.name);
   const head = resolveHeadline(s, name);
   const titleName = head.title;
   const topic = clean(s.topic);
-  const hookText = '자세한 내용은 본문에서 확인하세요👇';
+  const hookText = clean(s.hook) || '자세한 내용은 본문에서 확인하세요👇';
+  const CTA_TEXT = "'나도' 남겨주세요";
 
-  // 자막에 쓸 수 있는 내 레이블 글(프로젝트 이름·주제) — 없는 내용을 지어내지 않습니다.
-  const seed = [];
-  if (!isPlaceholderName(name)) seed.push(name);
-  if (topic && topic !== name) seed.push(topic);
-  seed.push(hookText);
+  // 2-1) 레퍼런스 공식(문제 제기 → 전환 → 해결·체감 → 정보 → CTA)으로 자막을 채웁니다.
+  //  · 카피 틀(s.copyLines)이 있으면 그 줄을, 없으면 formula.js 기본 틀을 씁니다.
+  //  · 없는 사실(가격·효능)은 기본 틀이 지어내지 않습니다 — 화면에 보이는 것만 Gemini가 채웁니다.
+  const copy = copyLinesFromText(s.copyLines);
+  const lines = buildBeats({ count: Math.max(1, beats), topic, name, copy: copy.length ? copy : null });
 
   const segsBuild = Array.from({ length: Math.max(1, beats) }, (_, i) => ({
     id: uid('seg'),
     start: round(i * step, 2),
     end: round(i === beats - 1 ? dur : (i + 1) * step, 2),
-    title: '', badge: '', subtitle: '', pos: {},
+    title: '', badge: '', subtitle: lines[i] || '', pos: {},
   }));
-  // 첫 칸은 제목, 마지막 칸은 후킹 멘트로 시작하고, 나머지는 위 글을 순서대로 나눠 채웁니다.
   segsBuild[0].title = titleName;
   segsBuild[0].badge = head.badge;
-  const slots = segsBuild.length;
-  if (slots === 1) {
-    segsBuild[0].subtitle = (seed[0] || hookText).slice(0, 24);
+  // 마지막 두 칸: CTA → 엔드카드 2줄 (레퍼런스 문법). 칸이 모자라면 마지막 한 칸만 CTA.
+  if (segsBuild.length >= 5) {
+    segsBuild[segsBuild.length - 2].subtitle = copy.length ? (lines[lines.length - 1] || CTA_TEXT) : CTA_TEXT;
   } else {
-    seed.forEach((txt, i) => {
-      const idx = i === seed.length - 1 ? slots - 1 : Math.min(i, slots - 2);
-      if (!segsBuild[idx].subtitle) segsBuild[idx].subtitle = String(txt).slice(0, 24);
-    });
+    segsBuild[segsBuild.length - 1].subtitle = hookText;
   }
-  p.segments = ensureSubtitleBeats(segsBuild, dur);
+  p.segments = layoutSegments(ensureSubtitleBeats(segsBuild, dur, tempo), clipDur(clips[0]));
+  if (p.segments.length >= 5) applyEndCard(p.segments[p.segments.length - 1], endCardLines({ topic, name }));
   p.segments.sort((a, b) => a.start - b.start);
 
   // 3) 디자인
@@ -777,12 +806,17 @@ export function applyPlan(plan, opts = {}) {
   segs.sort((a, b) => a.start - b.start);
   // 3-2) 최신 전체 길이 기준으로 0초~끝까지 1.5~2.3초 박자를 보장 (자막이 모자라면 자동 분할)
   const durNow = totalDuration();
-  let finalSegs = ensureSubtitleBeats(segs, durNow);
+  let finalSegs = ensureSubtitleBeats(segs, durNow, loadAiSettings().tempo);
   if (!finalSegs.length) finalSegs = segs;
   finalSegs.sort((a, b) => a.start - b.start);
   finalSegs[0].start = 0;
   finalSegs[finalSegs.length - 1].end = round(durNow, 2);
-  p.segments = finalSegs;
+  // 배치: 1컷만 상단 후킹, 2컷부터 하단 세이프존 (레퍼런스 공식)
+  p.segments = layoutSegments(finalSegs, clipDur(clips[0]));
+  // 엔드카드: AI가 2줄을 줬으면 마지막 구간을 가운데 2줄 카드로
+  if (plan.endcard && plan.endcard.length && p.segments.length >= 3) {
+    applyEndCard(p.segments[p.segments.length - 1], plan.endcard);
+  }
 
   // 4) 모션·전환 (구간 수와 클립 수가 같을 때만 1:1 대응)
   if (segs.length === clips.length) {
