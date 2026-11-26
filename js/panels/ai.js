@@ -1053,6 +1053,7 @@ async function loadBlogOneStop() {
   const input = $('#blogUrl', pane);
   const url = normalizeBlogUrl(input.value);
   if (!url) { blogStatus('블로그 주소를 먼저 입력해 주세요.', 'err'); return; }
+  const prevUrl = loadCaptionState().url;
   input.value = url;
   setBlogBusy(true);
   blogStatus('글 제목·본문·사진을 가져오는 중… (최대 40초)', 'warn');
@@ -1077,7 +1078,7 @@ async function loadBlogOneStop() {
     emit('project', { panels: [] });
     blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장 · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, images.length ? 'ok' : 'warn');
     // 5채널 캡션은 바로 만들기 (키 있으면 Gemini, 없으면 본문 기반)
-    await makeCaptionsFromBlog({ silent: true });
+    await makeCaptionsFromBlog({ silent: true, onlyEmpty: prevUrl === post.url });
   } catch (e) {
     blogStatus(`${e.message}${e.detail ? ` [${e.detail}]` : ''}`, 'err');
   } finally {
@@ -1322,7 +1323,7 @@ async function makeCarouselFromBlog(blog) {
 }
 
 /** 블로그 본문으로 5채널 캡션 만들기 — 키가 있으면 Gemini, 없으면 본문 기반 */
-async function makeCaptionsFromBlog({ silent = false } = {}) {
+async function makeCaptionsFromBlog({ silent = false, onlyEmpty = false } = {}) {
   const cap = loadCaptionState();
   const blog = loadBlogStore();
   const body = (cap.body || (blog && blog.body) || '').trim();
@@ -1351,7 +1352,7 @@ async function makeCaptionsFromBlog({ silent = false } = {}) {
     const local = buildLocalCaptions({ title, body, hashtags: (blog && blog.hashtags) || [], url: cap.url });
     caps = parseCaptions(JSON.stringify(local), { body, title, keywords: local.keywords });
   }
-  mergeCaptions(caps);
+  mergeCaptions(caps, { onlyEmpty });
   const n = CAPTION_CHANNELS.filter((c) => (caps[c.id] || '').trim()).length;
   capStatus(`5채널 캡션 준비 완료 — ${n}개 채널. 네이버 클립은 #오늘클립챌린지 #클립크리에이터 + 핵심 태그 3개로 맞췄습니다.`, n === 5 ? 'ok' : 'warn');
   return caps;
@@ -1492,10 +1493,13 @@ function updateCapFoot(id) {
   }
 }
 
-function mergeCaptions(caps) {
+function mergeCaptions(caps, { onlyEmpty = false } = {}) {
   for (const ch of CAPTION_CHANNELS) {
     const v = (caps[ch.id] || '').trim();
-    if (v) capState.captions[ch.id] = v;
+    if (!v) continue;
+    // 같은 글을 다시 불러왔을 때는 직접 고친 캡션을 덮어쓰지 않습니다.
+    if (onlyEmpty && (capState.captions[ch.id] || '').trim()) continue;
+    capState.captions[ch.id] = v;
   }
   saveCaptionState({ captions: capState.captions });
   renderCaptions();

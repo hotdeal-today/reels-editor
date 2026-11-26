@@ -908,6 +908,11 @@ async function fetchBlogInExport() {
     renderExCaptions();
     capStatus(`가져왔습니다 — “${post.title}” · 사진 ${images.length}장 · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, 'ok');
     emit('project', { panels: ['ai', 'export'] });
+    // 카드가 아직 없으면 바로 카드까지 만들기 (URL → 카드 원스톱)
+    const store = carStore();
+    if ((!store || !store.cards.length) && images.length) {
+      await buildFromBlog();
+    }
   } catch (e) {
     capStatus(`${e.message}${e.detail ? ` [${e.detail}]` : ''}`, 'err');
   } finally {
