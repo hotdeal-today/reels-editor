@@ -22,6 +22,7 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
   });
   const failed = files.failed || [];
   const images = [];
+  const skippedSmall = [];
   for (const f of files) {
     try {
       const { asset } = await importMediaFile(f.file);
@@ -29,6 +30,7 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
       const w = asset.width || 0;
       const h = asset.height || 0;
       if (w && h && ((w < 620 && h < 400) || w < 400)) {
+        skippedSmall.push({ url: String(f.url || '').slice(0, 160), w, h });
         await forgetAsset(asset.id).catch(() => {});
         continue;
       }
@@ -51,6 +53,14 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
   });
   const skipped = want - images.length;
   if (skipped > 0) console.warn(`[blog] 사진 ${skipped}장을 프로젝트에 넣지 못했습니다`, { failed, skipped });
+  // 진단용 — 어떤 사진이 왜 빠졌는지 콘솔 없이도 볼 수 있게 남깁니다.
+  if (typeof window !== 'undefined') {
+    window.__reelsBlogLast = {
+      url: post.url, found: post.images.length, requested: want, loaded: images.length,
+      failed: failed.map((f) => ({ url: String(f.url || '').slice(0, 160), message: f.message })),
+      skippedSmall,
+    };
+  }
   saveCaptionState({ url: post.url, body: post.body, title });
   if (setName && state.project) {
     const cur = state.project.name || '';
