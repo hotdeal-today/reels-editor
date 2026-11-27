@@ -105,6 +105,9 @@ export async function play() {
 
 async function startPlayback(dur) {
   if (state.time >= dur - 0.02) state.time = 0;
+  // 브라우저 음성(speechSynthesis)·구간 음성 '듣기'가 켜져 있으면 같이 들려 중복되므로 먼저 멈춥니다.
+  try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) { /* 무시 */ }
+  try { window.dispatchEvent(new CustomEvent('reels:audition-stop')); } catch (e) { /* 무시 */ }
   const mix = await ensureMix();
   const ac = audioCtx();
   stopSource();

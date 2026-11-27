@@ -2,9 +2,11 @@
 //  · Gemini TTS(무료 키) → 실제 WAV 오디오를 만들어 타임라인에 넣고 MP4에 믹싱
 //  · 브라우저 음성(speechSynthesis)은 스피커로만 나가므로 '타이밍 미리듣기' 전용
 //  · 구간별 마이크 녹음 / 외부 TTS 파일(클로바더빙·브루 등) 삽입
-import { state, persist, mixDirty, getAsset } from './state.js';
-import { importAudioFile } from './media.js';
+import { state, persist, mixDirty, getAsset, totalDuration } from './state.js';
+import { importAudioFile, decodeAudio } from './media.js';
+import { isAssetUsed, forgetAsset } from './assets.js';
 import { uid, clamp, round } from './util.js';
+import { planVoiceLayout, planSummary, voiceContent, describePlan } from './voicelayout.js';
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -123,12 +125,14 @@ export function voiceClips() {
   return p.audio.voice;
 }
 
-export async function addVoiceClip({ blob, name, start, volume = 100, segId = null, kind = 'tts' }) {
+export async function addVoiceClip({ blob, name, start, volume = 100, segId = null, kind = 'tts', voiceName = '' }) {
   const p = state.project;
   const ext = (blob.type || '').includes('wav') ? 'wav' : ((blob.type || '').includes('mp4') ? 'm4a' : 'webm');
   const base = String(name || '음성').replace(/\.(wav|mp3|m4a|aac|webm|ogg)$/i, '').trim() || '음성';
   const file = new File([blob], `${base}.${ext}`, { type: blob.type || 'audio/wav' });
   const asset = await importAudioFile(file);
+  let quiet = { lead: 0, tail: 0 };
+  try { quiet = measureSilence(await decodeAudio(asset.id)); } catch (e) { quiet = { lead: 0, tail: 0 }; }
   p.audio.voice = Array.isArray(p.audio.voice) ? p.audio.voice : [];
   const item = {
     id: uid('vc'),
@@ -137,8 +141,12 @@ export async function addVoiceClip({ blob, name, start, volume = 100, segId = nu
     start: round(clamp(Number(start) || 0, 0, Math.max(0, 9999)), 2),
     volume: clamp(Number(volume) || 100, 0, 150),
     duration: round(asset.duration || 0, 2),
+    lead: quiet.lead,   // 앞 무음(초) — 배치 계산에서 뺍니다
+    tail: quiet.tail,   // 뒤 무음(초)
     segId,
     kind,
+    voiceName: voiceName || '',
+    createdAt: Date.now(),
   };
   p.audio.voice.push(item);
   p.audio.voice.sort((a, b) => a.start - b.start);
@@ -147,11 +155,109 @@ export async function addVoiceClip({ blob, name, start, volume = 100, segId = nu
   return item;
 }
 
-export function removeVoiceClip(id) {
+/**
+ * 오디오의 앞뒤 무음을 잽니다. (Gemini TTS는 앞뒤에 0.2~0.5초 무음이 붙어 오는 경우가 많음)
+ *  · 무음을 빼면 배속 없이도 자막 구간에 들어가는 경우가 많아집니다.
+ *  · 소리가 거의 없는 파일은 자르지 않습니다(말소리 잘림 방지).
+ */
+export function measureSilence(buf, { threshold = 0.02, maxLead = 0.5, maxTail = 0.6 } = {}) {
+  if (!buf || !buf.length) return { lead: 0, tail: 0 };
+  const sr = buf.sampleRate || 48000;
+  const n = buf.length;
+  const chans = [];
+  for (let c = 0; c < Math.min(2, buf.numberOfChannels || 1); c++) chans.push(buf.getChannelData(c));
+  const amp = (i) => {
+    let m = 0;
+    for (let c = 0; c < chans.length; c++) {
+      const a = Math.abs(chans[c][i]);
+      if (a > m) m = a;
+    }
+    return m;
+  };
+  const step = Math.max(1, Math.round(sr / 200)); // 5ms
+  let peak = 0;
+  for (let i = 0; i < n; i += step) {
+    const a = amp(i);
+    if (a > peak) peak = a;
+  }
+  if (peak < 0.05) return { lead: 0, tail: 0 };
+  const gate = Math.max(threshold, peak * 0.06);
+  const leadMax = Math.min(n - 1, Math.round(maxLead * sr));
+  let i = 0;
+  while (i < leadMax && amp(i) < gate) i++;
+  const leadN = Math.max(0, i - Math.round(0.03 * sr)); // 첫소리 앞 30ms는 남김
+  const tailMax = Math.min(n - 1, Math.round(maxTail * sr));
+  let j = n - 1;
+  const jStop = n - 1 - tailMax;
+  while (j > jStop && amp(j) < gate) j--;
+  const tailN = Math.max(0, (n - 1 - j) - Math.round(0.04 * sr));
+  const total = n / sr;
+  let lead = leadN / sr;
+  let tail = tailN / sr;
+  if (total - lead - tail < 0.3) return { lead: 0, tail: 0 };
+  return { lead: round(lead, 3), tail: round(tail, 3) };
+}
+
+export function removeVoiceClip(id, { forget = false } = {}) {
   const p = state.project;
+  const item = (p.audio.voice || []).find((v) => v.id === id);
   p.audio.voice = (p.audio.voice || []).filter((v) => v.id !== id);
   mixDirty();
   persist();
+  if (forget && item && item.assetId && !isAssetUsed(item.assetId)) forgetAsset(item.assetId).catch(() => {});
+}
+
+/** 지금 프로젝트의 음성 배치(겹침 0 보정 결과) — 화면·검증용 */
+export function voiceLayoutNow() {
+  return planVoiceLayout(voiceClips(), { duration: totalDuration() });
+}
+
+/** 화면에 쓸 한 줄: "2.9초 → 2.15초 (1.35배속)" */
+export function voiceTimingText(v, lay) {
+  if (!v) return '';
+  const { speak } = voiceContent(v);
+  const l = lay || voiceLayoutNow().get(v.id);
+  if (!l || !l.played) return v.duration ? `${(v.duration || 0).toFixed(1)}초` : '';
+  const head = speak > l.played + 0.03 ? `${speak.toFixed(1)}초 → ${l.played.toFixed(1)}초` : `${l.played.toFixed(1)}초`;
+  const extra = describePlan(l);
+  return extra ? `${head} (${extra})` : head;
+}
+
+/**
+ * 같은 구간에 두 번 이상 들어간 음성(중복), 이미 사라진 구간의 음성을 정리합니다.
+ *  · 자막을 다시 만들면 구간 id가 새로 생기므로, 옛 음성이 남아 새 음성과 겹쳐 들리는 일이 있었습니다.
+ */
+export function pruneVoiceClips({ orphans = true } = {}) {
+  const p = state.project;
+  if (!p) return 0;
+  const voices = Array.isArray(p.audio.voice) ? p.audio.voice.slice() : [];
+  if (!voices.length) return 0;
+  const segIds = new Set((p.segments || []).map((s) => s.id));
+  const keepers = new Map();
+  const drop = [];
+  voices.forEach((v) => {
+    if (!v || !v.id || !v.assetId) { if (v && v.id) drop.push(v.id); return; }
+    if (orphans && v.segId && !segIds.has(v.segId)) { drop.push(v.id); return; }
+    if (!v.segId) return;
+    const prev = keepers.get(v.segId);
+    if (!prev) { keepers.set(v.segId, v); return; }
+    const newer = (Number(v.createdAt) || 0) >= (Number(prev.createdAt) || 0) ? v : prev;
+    const older = newer === v ? prev : v;
+    keepers.set(v.segId, newer);
+    drop.push(older.id);
+  });
+  for (const id of drop) removeVoiceClip(id, { forget: true });
+  return drop.length;
+}
+
+/** 진단용 — 라이브 페이지 콘솔에서 겹침 여부를 바로 볼 수 있게 */
+if (typeof window !== 'undefined') {
+  window.__reelsVoicePlan = () => {
+    try {
+      const plan = voiceLayoutNow();
+      return { rows: Array.from(plan.values()), ...planSummary(plan, totalDuration()) };
+    } catch (e) { return { error: e.message || String(e) }; }
+  };
 }
 
 /** 구간에 이미 들어간 음성 (교체용) */

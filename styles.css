@@ -879,6 +879,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 }
 .ai-seg-head .time { font-variant-numeric: tabular-nums; }
 .ai-badge-ok { font-size: 9px; color: #04180f; background: var(--mint); border-radius: 99px; padding: 2px 7px; font-weight: 800; }
+.ai-badge-warn { font-size: 9px; color: #2a1a00; background: #ffc24d; border-radius: 99px; padding: 2px 7px; font-weight: 800; margin-left: 4px; }
+.ai-voice-tag { font-size: 8.5px; font-weight: 700; color: #9fd8ff; background: rgba(90,170,230,.14); border-radius: 99px; padding: 1px 6px; margin-left: 3px; vertical-align: 1px; }
 .ai-seg-text { font-size: 11.5px; line-height: 1.45; margin: 5px 0 7px; color: var(--text); word-break: break-word; }
 .ai-seg-text .mut { color: var(--muted); font-size: 10.5px; }
 .ai-seg-acts { display: flex; flex-wrap: wrap; gap: 4px; }

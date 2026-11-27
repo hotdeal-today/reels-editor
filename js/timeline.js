@@ -2,6 +2,7 @@
 import { $, clamp, emit, fmtSec } from './util.js';
 import { state, clipDur, clipStart, totalDuration, getAsset } from './state.js';
 import { sfxDuration, sfxName } from './audio.js';
+import { planVoiceLayout } from './voicelayout.js';
 import { seek } from './player.js';
 
 const TRACKS = ['clips', 'title', 'badge', 'subtitle', 'narration', 'bgm', 'sfx'];
@@ -122,12 +123,17 @@ export function renderTimeline() {
   const nTrack = trackEl('narration');
   const nar = p && p.audio.narration;
   const voices = (p && p.audio.voice) || [];
+  // 겹침 0 보정된 실제 위치·길이 — 미리듣기·내보내기와 같은 계산
+  const voiceLay = p ? planVoiceLayout(voices, { duration: totalDuration() }) : null;
   nTrack.innerHTML = (nar
     ? `<div class="tl-block audio" data-audio="narration" style="left:${(nar.start || 0) * pps}px;width:${Math.max(6, (nar.duration || 2) * pps)}px"><span class="lbl">${escapeName(nar.name || '나레이션')}</span></div>`
     : '') + voices.map((v) => {
-    const left = (v.start || 0) * pps;
-    const w = Math.max(10, (v.duration || 1) * pps);
-    return `<div class="tl-block voice" data-voice="${v.id}" style="left:${left}px;width:${w}px"><span class="lbl">${escapeName(v.name || '음성')}</span></div>`;
+    const l = voiceLay && voiceLay.get(v.id);
+    const at = l ? l.start : (v.start || 0);
+    const len = l ? l.played : (v.duration || 1);
+    const left = at * pps;
+    const w = Math.max(10, len * pps);
+    return `<div class="tl-block voice" data-voice="${v.id}" style="left:${left}px;width:${w}px"><span class="lbl">${escapeName(v.name || '음성')}${l && l.spedUp ? ' ⚡' : ''}</span></div>`;
   }).join('');
 
   // BGM

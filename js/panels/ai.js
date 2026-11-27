@@ -1,6 +1,6 @@
 // panels/ai.js — 탭5: AI 자동 세팅 (원클릭 · 프롬프트 복사/붙여넣기 · Gemini · TTS · 프로젝트 파일)
 import { $, $$, clamp, emit, escapeHtml, fmtSec, downloadBlob, uid } from '../util.js';
-import { state, totalDuration, persist, getAsset, ensureSegments } from '../state.js';
+import { state, totalDuration, persist, getAsset, ensureSegments, mixDirty } from '../state.js';
 import {
   loadAiSettings, saveAiSettings, maskKey, listModels, pickModels,
   buildChatPrompt, buildPrompt, collectFrames, askGemini, askGeminiText, parsePlan, applyPlan,
@@ -20,7 +20,9 @@ import { DEFAULT_COPY } from '../formula.js';
 import {
   geminiTts, addVoiceClip, removeVoiceClip, voiceClips, previewSpeech, stopSpeech,
   localVoices, speechSupported, recordVoice, voiceAssetName,
+  pruneVoiceClips, voiceLayoutNow, voiceTimingText,
 } from '../tts.js';
+import { planSummary } from '../voicelayout.js';
 import { forgetAsset } from '../assets.js';
 import { buildProjectJson, loadProjectJson, projectFileName } from '../project-io.js';
 import { seek } from '../player.js';
@@ -29,6 +31,14 @@ let pane = null;
 let rec = null;
 let busy = false;
 let capBusy = false;
+let auditionAudio = null; // 구간 음성 '듣기'는 한 번에 하나만
+
+/** 구간 음성 미리듣기 정지 */
+function stopAudition() {
+  if (!auditionAudio) return;
+  try { auditionAudio.pause(); } catch (e) { /* 무시 */ }
+  auditionAudio = null;
+}
 let availableModels = null; // { ids, text, tts }
 
 export function initAiPanel(el) {
@@ -250,6 +260,10 @@ export function initAiPanel(el) {
           </select>
         </div>
         <button class="btn primary block" id="ttsGenAll" type="button">🗣 전체 자막 TTS 만들기 (Gemini)</button>
+        <div class="sec-note" style="margin:6px 0 0">
+          목소리는 위에서 고른 <b>한 가지로 전부</b> 만들고, 다시 만들면 그 구간의 옛 음성은 남기지 않습니다.<br>
+          음성이 자막 구간보다 길면 <b>겹쳐 들리지 않게</b> 자동으로 최대 1.35배속·시작 시각을 맞춥니다(미리듣기·MP4 동일).
+        </div>
         <div class="ai-warn hidden" id="ttsStaleNote" style="margin-top:8px"></div>
         <div class="row" style="margin-top:8px">
           <label>브라우저 음성</label>
@@ -404,6 +418,8 @@ function narrationText(sg) {
   return String((sg && (sg.subtitle || sg.title || sg.badge)) || '').trim();
 }
 
+const segTime = (sg) => (sg ? `${sg.start.toFixed(1)}~${sg.end.toFixed(1)}초` : '');
+
 /**
  * 자막(segments)이 새로 만들어지면 옛 나레이션을 먼저 비웁니다.
  *  · 구간(segId)에 묶인 옛 음성은 새 구간에 없으면 지웁니다
@@ -430,6 +446,9 @@ async function narrateSegments() {
   if (!s.apiKey) return { ok: 0, fail: 0, skipped: 'key' };
   const segs = (state.project.segments || []).filter((sg) => narrationText(sg));
   if (!segs.length) return { ok: 0, fail: 0, skipped: 'empty' };
+  // 이 배치 전체를 한 목소리로 고정합니다.
+  const voice = ($('#ttsVoice', pane) && $('#ttsVoice', pane).value) || s.voice || 'Kore';
+  saveAiSettings({ voice });
   let model = (availableModels && availableModels.tts) || s.ttsModel;
   if (!availableModels) {
     try {
@@ -440,17 +459,18 @@ async function narrateSegments() {
       saveAiSettings({ model: picked.text || s.model, ttsModel: model });
     } catch (e) { /* 기본 모델로 시도 */ }
   }
+  const pruned = pruneVoiceClips();
   const done = new Set(voiceClips().filter((v) => v.segId).map((v) => v.segId));
   const todo = segs.filter((sg) => !done.has(sg.id));
   let ok = 0, fail = 0, lastErr = '';
   for (let i = 0; i < todo.length; i++) {
     const sg = todo[i];
     const text = narrationText(sg);
-    status(`나레이션 ${i + 1}/${todo.length} — ${text.slice(0, 20)}… (${sg.start.toFixed(1)}초부터, 자막과 1:1)`, 'warn');
+    status(`나레이션 ${i + 1}/${todo.length} — ${text.slice(0, 20)}… (${segTime(sg)}부터, 자막과 1:1)`, 'warn');
     try {
-      const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice: ($('#ttsVoice', pane) && $('#ttsVoice', pane).value) || s.voice });
-      voiceClips().filter((v) => v.segId === sg.id).forEach((v) => removeVoiceClip(v.id));
-      await addVoiceClip({ blob, name: voiceAssetName(sg, 'TTS'), start: sg.start, segId: sg.id, kind: 'tts' });
+      const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice });
+      voiceClips().filter((v) => v.segId === sg.id).forEach((v) => removeVoiceClip(v.id, { forget: true }));
+      await addVoiceClip({ blob, name: voiceAssetName(sg, 'TTS'), start: sg.start, segId: sg.id, kind: 'tts', voiceName: voice });
       ok++;
     } catch (e) {
       fail++;
@@ -458,9 +478,10 @@ async function narrateSegments() {
       if (/API 키|한도|권한/.test(lastErr)) break;
     }
   }
+  pruneVoiceClips();
   emit('project', { panels: ['audio', 'ai'] });
   renderTts();
-  return { ok, fail, lastErr, total: todo.length };
+  return { ok, fail, lastErr, total: todo.length, pruned };
 }
 
 /**
@@ -667,10 +688,20 @@ function bindEvents() {
     if (!s.apiKey) { status('Gemini TTS는 무료 API 키가 필요합니다. 키 없이 쓰려면 구간별 "브라우저 음성" 미리듣기나 마이크 녹음을 사용하세요.', 'err'); return; }
     const segs = (state.project.segments || []).filter((sg) => (sg.subtitle || sg.title || '').trim());
     if (!segs.length) { status('읽을 자막이 없습니다. 먼저 제목·자막을 넣어 주세요.', 'err'); return; }
-    const done = new Set(voiceClips().filter((v) => v.segId).map((v) => v.segId));
-    const todo = segs.filter((sg) => !done.has(sg.id));
-    if (!todo.length) { status('모든 구간에 이미 음성이 있습니다. 필요한 구간만 다시 만들어 주세요.', 'warn'); return; }
     saveSettingsFromUI();
+    const settings = loadAiSettings();
+    // 목소리는 이 배치 전체에서 하나로 고정합니다(중간에 바뀌어 2~3가지 목소리가 섞이는 일 방지).
+    const voice = ($('#ttsVoice', pane) && $('#ttsVoice', pane).value) || settings.voice || 'Kore';
+    saveAiSettings({ voice });
+    // 옛 구간·중복 음성을 먼저 정리합니다(겹침·중복 재생의 원인).
+    const pruned = pruneVoiceClips();
+    const done = new Set(voiceClips().filter((v) => v.segId).map((v) => v.segId));
+    let todo = segs.filter((sg) => !done.has(sg.id));
+    if (!todo.length) {
+      const redo = window.confirm('모든 구간에 이미 음성이 있습니다.\n\n같은 목소리로 전부 새로 만들까요? [확인] 기존 음성을 지우고 다시 만듭니다.');
+      if (!redo) { status('그대로 두었습니다. 필요한 구간만 ✨ TTS로 다시 만들 수 있습니다.', 'warn'); return; }
+      todo = segs.slice();
+    }
     busyState(true);
     let model = (availableModels && availableModels.tts) || s.ttsModel;
     if (!availableModels) {
@@ -687,10 +718,12 @@ function bindEvents() {
     for (let i = 0; i < todo.length; i++) {
       const sg = todo[i];
       const text = (sg.subtitle || sg.title || '').trim();
-      status(`TTS ${i + 1}/${todo.length} — ${text.slice(0, 20)}…`, 'warn');
+      status(`TTS ${i + 1}/${todo.length} — ${text.slice(0, 20)}… (${segTime(sg)} · 겹침 없이 배치)`, 'warn');
       try {
-        const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice: $('#ttsVoice', pane).value || s.voice });
-        await addVoiceClip({ blob, name: voiceAssetName(sg, 'TTS'), start: sg.start, segId: sg.id, kind: 'tts' });
+        const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice });
+        // 같은 구간의 옛 음성은 남김없이 지우고 새로 넣습니다(중복 잔여 금지).
+        voiceClips().filter((v) => v.segId === sg.id).forEach((v) => removeVoiceClip(v.id, { forget: true }));
+        await addVoiceClip({ blob, name: voiceAssetName(sg, 'TTS'), start: sg.start, segId: sg.id, kind: 'tts', voiceName: voice });
         ok++;
       } catch (e) {
         fail++;
@@ -699,14 +732,18 @@ function bindEvents() {
       }
     }
     busyState(false);
+    pruneVoiceClips();
     emit('project', { panels: ['audio'] });
     renderTts();
-    status(`TTS 완료 — 성공 ${ok}개${fail ? ` · 실패 ${fail}개 (${lastErr})` : ''}`, fail ? 'warn' : 'ok');
-    if (ok) emit('toast', { msg: `구간 음성 ${ok}개를 만들었습니다. 미리보기와 MP4에 섞입니다.`, type: 'ok' });
+    const sum = planSummary(voiceLayoutNow(), totalDuration());
+    const layNote = sum.count ? ` · 겹침 ${sum.overlaps}건${sum.sped ? ` · 자동 배속 ${sum.sped}개` : ''}` : '';
+    status(`TTS 완료 — 성공 ${ok}개${pruned ? ` · 옛 음성 ${pruned}개 정리` : ''}${fail ? ` · 실패 ${fail}개 (${lastErr})` : ''}${layNote}`, fail ? 'warn' : 'ok');
+    if (ok) emit('toast', { msg: `${voice} 목소리로 구간 음성 ${ok}개를 만들었습니다${sum.sped ? ` (겹치지 않게 ${sum.sped}개 자동 배속)` : ''}. 미리보기와 MP4에 섞입니다.`, type: 'ok' });
   });
 
   $('#ttsSegList', pane).addEventListener('click', onSegAction);
   $('#ttsVoiceList', pane).addEventListener('click', onVoiceAction);
+  window.addEventListener('reels:audition-stop', stopAudition);
   const staleBox = $('#ttsStaleNote', pane);
   if (staleBox) staleBox.addEventListener('click', onVoiceAction);
   $('#ttsVoiceList', pane).addEventListener('input', (e) => {
@@ -717,6 +754,7 @@ function bindEvents() {
     item.volume = clamp(Number(e.target.value) || 0, 0, 150);
     const label = $(`[data-voicevol-label="${id}"]`, pane);
     if (label) label.textContent = `${item.volume}%`;
+    mixDirty();
     emit('save');
     emit('project', { panels: [] });
   });
@@ -776,15 +814,28 @@ function renderSegList() {
     return;
   }
   const voices = voiceClips();
+  const lay = voiceLayoutNow();
   box.innerHTML = segs.map((sg, i) => {
     const text = (sg.subtitle || sg.title || '').trim();
-    const has = voices.find((v) => v.segId === sg.id);
+    const mine = voices.filter((v) => v.segId === sg.id);
+    const has = mine[0] || null;
+    const l = has ? lay.get(has.id) : null;
+    let badge = '';
+    if (has) {
+      if (l && l.played) {
+        const tag = [l.spedUp ? `${l.rate.toFixed(2)}배속` : '', l.trimmed ? '끝 잘림' : ''].filter(Boolean).join(' · ');
+        badge = `<span class="ai-badge-ok" title="${escapeHtml(`음성 ${(has.duration || 0).toFixed(1)}초 → 실제 ${l.played.toFixed(1)}초${tag ? ` (${tag})` : ''}`)}">음성 ${l.played.toFixed(1)}초${l.spedUp ? ' ⚡' : ''}${l.trimmed ? ' ✂' : ''}</span>`;
+      } else {
+        badge = `<span class="ai-badge-ok">음성 ${has.duration ? has.duration.toFixed(1) + '초' : '있음'}</span>`;
+      }
+    }
+    if (mine.length > 1) badge += `<span class="ai-badge-warn">중복 ${mine.length}개</span>`;
     return `<div class="ai-seg${text ? '' : ' dim'}" data-segid="${sg.id}">
       <div class="ai-seg-head">
         <span class="num">${i + 1}</span>
         <span class="time">${sg.start.toFixed(1)}~${sg.end.toFixed(1)}초</span>
         <span class="grow"></span>
-        ${has ? `<span class="ai-badge-ok">음성 ${has.duration ? has.duration.toFixed(1) + '초' : '있음'}</span>` : ''}
+        ${badge}
       </div>
       <div class="ai-seg-text">${text ? escapeHtml(text) : '<span class="mut">자막 없음 — 탭2에서 넣어 주세요</span>'}</div>
       <div class="ai-seg-acts">
@@ -808,13 +859,18 @@ function renderVoiceList() {
     box.innerHTML = `<div class="ai-empty">아직 구간 음성이 없습니다. 위에서 TTS·녹음·파일로 넣을 수 있습니다.</div>`;
     return;
   }
+  const lay = voiceLayoutNow();
   box.innerHTML = items.map((v) => {
     const seg = state.project.segments.find((s) => s.id === v.segId);
+    const l = lay.get(v.id) || null;
+    const at = l ? l.start : (v.start || 0);
+    const played = l ? l.played : (v.duration || 0);
+    const durTxt = voiceTimingText(v, l) || `${played.toFixed(1)}초`;
     return `<div class="ai-voice" data-voice="${v.id}">
       <button class="icon-btn sm" data-voiceact="play" data-voiceid="${v.id}" type="button" title="듣기">▶</button>
       <div class="ai-voice-meta">
-        <b>${escapeHtml(v.name || '음성')}</b>
-        <small>${(v.start || 0).toFixed(2)}초 · ${(v.duration || 0).toFixed(1)}초${seg ? ` · ${seg.start.toFixed(1)}~${seg.end.toFixed(1)}초 구간` : ''}</small>
+        <b>${escapeHtml(v.name || '음성')}${v.voiceName ? ` <span class="ai-voice-tag">${escapeHtml(v.voiceName)}</span>` : ''}</b>
+        <small>${at.toFixed(2)}초 · ${durTxt}${seg ? ` · ${seg.start.toFixed(1)}~${seg.end.toFixed(1)}초 구간` : ''}</small>
       </div>
       <input type="range" data-voicevol="${v.id}" min="0" max="150" step="5" value="${v.volume ?? 100}" aria-label="볼륨">
       <span class="v" data-voicevol-label="${v.id}">${v.volume ?? 100}%</span>
@@ -860,10 +916,11 @@ async function onSegAction(e) {
           saveAiSettings({ model: availableModels.text || s.model, ttsModel: model });
         } catch (err) { /* 기본값으로 시도 */ }
       }
-      const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice: $('#ttsVoice', pane).value || s.voice });
-      const old = voiceClips().find((v) => v.segId === seg.id);
-      if (old) removeVoiceClip(old.id);
-      await addVoiceClip({ blob, name: voiceAssetName(seg, 'TTS'), start: seg.start, segId: seg.id, kind: 'tts' });
+      const voice = ($('#ttsVoice', pane) && $('#ttsVoice', pane).value) || s.voice || 'Kore';
+      saveAiSettings({ voice });
+      const { blob } = await geminiTts(text, { apiKey: s.apiKey, model, voice });
+      voiceClips().filter((v) => v.segId === seg.id).forEach((v) => removeVoiceClip(v.id, { forget: true }));
+      await addVoiceClip({ blob, name: voiceAssetName(seg, 'TTS'), start: seg.start, segId: seg.id, kind: 'tts', voiceName: voice });
       renderTts();
       emit('project', { panels: ['audio'] });
       status('구간 TTS를 만들었습니다.', 'ok');
@@ -895,8 +952,7 @@ async function onSegAction(e) {
       btn.classList.remove('danger');
       btn.textContent = '🎙 녹음';
       if (!done.blob.size) throw new Error('녹음된 소리가 없습니다.');
-      const old = voiceClips().find((v) => v.segId === seg.id);
-      if (old) removeVoiceClip(old.id);
+      voiceClips().filter((v) => v.segId === seg.id).forEach((v) => removeVoiceClip(v.id, { forget: true }));
       await addVoiceClip({ blob: done.blob, name: voiceAssetName(seg, '녹음'), start: seg.start, segId: seg.id, kind: 'mic' });
       renderTts();
       emit('project', { panels: ['audio'] });
@@ -919,8 +975,7 @@ async function onSegAction(e) {
       const f = input.files && input.files[0];
       if (!f) return;
       try {
-        const old = voiceClips().find((v) => v.segId === seg.id);
-        if (old) removeVoiceClip(old.id);
+        voiceClips().filter((v) => v.segId === seg.id).forEach((v) => removeVoiceClip(v.id, { forget: true }));
         await addVoiceClip({ blob: f, name: f.name.replace(/\.[a-z0-9]+$/i, '') || voiceAssetName(seg, '음성'), start: seg.start, segId: seg.id, kind: 'file' });
         renderTts();
         emit('project', { panels: ['audio'] });
@@ -938,25 +993,32 @@ function renderStaleNote() {
   const el = $('#ttsStaleNote', pane);
   if (!el) return;
   const segIds = new Set((state.project.segments || []).map((s) => s.id));
-  const stale = voiceClips().filter((v) => v.segId && !segIds.has(v.segId));
-  if (!stale.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const items = voiceClips();
+  const stale = items.filter((v) => v.segId && !segIds.has(v.segId));
+  const bySeg = new Map();
+  items.forEach((v) => { if (v.segId) bySeg.set(v.segId, (bySeg.get(v.segId) || 0) + 1); });
+  const dup = Array.from(bySeg.values()).reduce((a, n) => a + Math.max(0, n - 1), 0);
+  if (!stale.length && !dup) { el.classList.add('hidden'); el.innerHTML = ''; return; }
   el.classList.remove('hidden');
-  el.innerHTML = `지금 자막과 맞지 않는 <b>옛 나레이션 ${stale.length}개</b>가 남아 있습니다(자막이 새로 만들어지기 전 것).
-    <button class="btn tiny danger" id="ttsClearStale" type="button" style="margin-left:6px">지우기</button>`;
+  const bits = [];
+  if (stale.length) bits.push(`지금 자막과 맞지 않는 <b>옛 나레이션 ${stale.length}개</b>`);
+  if (dup) bits.push(`같은 구간에 <b>중복 음성 ${dup}개</b>`);
+  el.innerHTML = `${bits.join(' · ')}가 남아 있습니다(겹쳐 들리는 원인).
+    <button class="btn tiny danger" id="ttsClearStale" type="button" style="margin-left:6px">정리하기</button>`;
 }
 
 function onVoiceAction(e) {
   if (e.target.closest('#ttsClearStale')) {
-    const n = purgeOldNarration();
+    const n = pruneVoiceClips();
     renderTts();
     emit('project', { panels: ['audio', 'ai'] });
-    emit('toast', { msg: `자막과 맞지 않던 옛 나레이션 ${n}개를 지웠습니다.`, type: 'ok' });
+    emit('toast', { msg: n ? `옛·중복 음성 ${n}개를 정리했습니다.` : '정리할 음성이 없습니다.', type: n ? 'ok' : '' });
     return;
   }
   const btn = e.target.closest('[data-voiceact]');
   const id = btn.dataset.voiceid;
   if (btn.dataset.voiceact === 'del') {
-    removeVoiceClip(id);
+    removeVoiceClip(id, { forget: true });
     renderTts();
     emit('project', { panels: ['audio'] });
     emit('toast', { msg: '구간 음성을 삭제했습니다.' });
@@ -968,8 +1030,11 @@ function onVoiceAction(e) {
     if (!asset || !asset.url) { emit('toast', { msg: '음성 파일을 찾지 못했습니다.', type: 'err' }); return; }
     try {
       stopSpeech();
+      stopAudition();   // 이전에 누른 ▶ 음성을 먼저 멈춥니다(중복 재생 방지)
       const audio = new Audio(asset.url);
+      auditionAudio = audio;
       audio.volume = clamp((item.volume ?? 100) / 100, 0, 1);
+      audio.addEventListener('ended', () => { if (auditionAudio === audio) auditionAudio = null; }, { once: true });
       audio.play().catch(() => emit('toast', { msg: '재생할 수 없습니다.', type: 'err' }));
     } catch (err) { /* 무시 */ }
   }

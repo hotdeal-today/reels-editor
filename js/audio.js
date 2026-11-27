@@ -1,6 +1,7 @@
 // audio.js — 내장 효과음 합성(Web Audio) · 오디오 믹스다운 · 미리듣기
 import { state, getAsset, clipDur, clipStart } from './state.js';
 import { decodeAudio } from './media.js';
+import { planVoiceLayout } from './voicelayout.js';
 
 export const SR = 48000;
 
@@ -218,6 +219,11 @@ export async function previewSfx(id, volume = 1) {
   previewSrc = src;
 }
 
+function clampRate(r) {
+  const n = Number(r) || 1;
+  return Math.max(0.5, Math.min(2, n));
+}
+
 // ── 믹스다운 ────────────────────────────────────────────
 /** 타임라인 전체 오디오를 하나의 AudioBuffer로 섞습니다. */
 export async function buildMix(duration) {
@@ -314,17 +320,37 @@ export async function buildMix(duration) {
   }
 
   // 5) 구간 음성 (TTS · 녹음 · 외부 파일)
-  for (const item of p.audio.voice || []) {
-    const start = Math.max(0, item.start || 0);
+  //    앞뒤 음성이 절대 겹치지 않도록 voicelayout 이 계산한 시작·배속·길이로 놓습니다.
+  //    (미리듣기와 MP4 내보내기가 이 함수 하나를 같이 쓰므로 결과가 같습니다)
+  const voices = (p.audio.voice || []).filter((v) => v && v.assetId);
+  const voicePlan = planVoiceLayout(voices, { duration: dur });
+  for (const item of voices) {
+    const lay = voicePlan.get(item.id) || null;
+    const start = Math.max(0, lay ? lay.start : (item.start || 0));
     if (start >= dur) continue;
     const buf = await decodeAudio(item.assetId);
     if (!buf) continue;
     const src = oc.createBufferSource();
     src.buffer = buf;
+    const rate = lay ? clampRate(lay.rate) : 1;
+    src.playbackRate.value = rate;
+    const vol = Math.max(0, (item.volume ?? 100) / 100);
     const g = oc.createGain();
-    g.gain.value = Math.max(0, (item.volume ?? 100) / 100);
+    g.gain.value = vol;
+    // 읽을 구간: 앞뒤 무음(lead)을 건너뛰고 말소리만, 넘치면 꼬리를 자릅니다.
+    const offset = lay ? Math.max(0, Math.min(lay.offset, Math.max(0, buf.duration - 0.02))) : 0;
+    // 길이 정보가 없는 옛 음성은 디코딩한 실제 버퍼 길이로 놓습니다.
+    let content = lay && lay.content > 0.12 ? lay.content : Math.max(0.05, dur - start) * rate;
+    content = Math.max(0.02, Math.min(content, Math.max(0.02, buf.duration - offset)));
+    const played = Math.min(content / rate, Math.max(0.02, dur - start));
+    const cut = offset + content < buf.duration - 0.03; // 원본 끝까지 안 가고 끊기는 경우
+    if (cut) {
+      const fade = Math.min(0.04, played * 0.5);
+      g.gain.setValueAtTime(vol, Math.max(start, start + played - fade));
+      g.gain.linearRampToValueAtTime(0.0001, start + played);
+    }
     src.connect(g); g.connect(master);
-    src.start(start, 0, Math.min(buf.duration, Math.max(0.05, dur - start)));
+    src.start(start, offset, content);
   }
 
   return oc.startRendering();
