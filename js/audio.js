@@ -1,6 +1,6 @@
 // audio.js — 내장 효과음 합성(Web Audio) · 오디오 믹스다운 · 미리듣기
 import { state, getAsset, clipDur, clipStart } from './state.js';
-import { decodeAudio } from './media.js';
+import { decodeAudio, measureSilence } from './media.js';
 import { planVoiceLayout } from './voicelayout.js';
 
 export const SR = 48000;
@@ -323,12 +323,25 @@ export async function buildMix(duration) {
   //    앞뒤 음성이 절대 겹치지 않도록 voicelayout 이 계산한 시작·배속·길이로 놓습니다.
   //    (미리듣기와 MP4 내보내기가 이 함수 하나를 같이 쓰므로 결과가 같습니다)
   const voices = (p.audio.voice || []).filter((v) => v && v.assetId);
+  // 예전에 만든 음성은 앞뒤 무음(lead/tail) 정보가 없습니다 — 지금 재서 채워 둡니다(저장도 됨).
+  const voiceBufs = new Map();
+  for (const item of voices) {
+    const buf = await decodeAudio(item.assetId);
+    if (!buf) continue;
+    voiceBufs.set(item.id, buf);
+    if (!(Number(item.duration) > 0)) item.duration = Math.round(buf.duration * 100) / 100;
+    if (item.lead == null || item.tail == null) {
+      const q = measureSilence(buf);
+      item.lead = q.lead;
+      item.tail = q.tail;
+    }
+  }
   const voicePlan = planVoiceLayout(voices, { duration: dur });
   for (const item of voices) {
     const lay = voicePlan.get(item.id) || null;
     const start = Math.max(0, lay ? lay.start : (item.start || 0));
     if (start >= dur) continue;
-    const buf = await decodeAudio(item.assetId);
+    const buf = voiceBufs.get(item.id);
     if (!buf) continue;
     const src = oc.createBufferSource();
     src.buffer = buf;

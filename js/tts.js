@@ -3,7 +3,7 @@
 //  · 브라우저 음성(speechSynthesis)은 스피커로만 나가므로 '타이밍 미리듣기' 전용
 //  · 구간별 마이크 녹음 / 외부 TTS 파일(클로바더빙·브루 등) 삽입
 import { state, persist, mixDirty, getAsset, totalDuration } from './state.js';
-import { importAudioFile, decodeAudio } from './media.js';
+import { importAudioFile, decodeAudio, measureSilence } from './media.js';
 import { isAssetUsed, forgetAsset } from './assets.js';
 import { uid, clamp, round } from './util.js';
 import { planVoiceLayout, planSummary, voiceContent, describePlan } from './voicelayout.js';
@@ -155,48 +155,7 @@ export async function addVoiceClip({ blob, name, start, volume = 100, segId = nu
   return item;
 }
 
-/**
- * 오디오의 앞뒤 무음을 잽니다. (Gemini TTS는 앞뒤에 0.2~0.5초 무음이 붙어 오는 경우가 많음)
- *  · 무음을 빼면 배속 없이도 자막 구간에 들어가는 경우가 많아집니다.
- *  · 소리가 거의 없는 파일은 자르지 않습니다(말소리 잘림 방지).
- */
-export function measureSilence(buf, { threshold = 0.02, maxLead = 0.5, maxTail = 0.6 } = {}) {
-  if (!buf || !buf.length) return { lead: 0, tail: 0 };
-  const sr = buf.sampleRate || 48000;
-  const n = buf.length;
-  const chans = [];
-  for (let c = 0; c < Math.min(2, buf.numberOfChannels || 1); c++) chans.push(buf.getChannelData(c));
-  const amp = (i) => {
-    let m = 0;
-    for (let c = 0; c < chans.length; c++) {
-      const a = Math.abs(chans[c][i]);
-      if (a > m) m = a;
-    }
-    return m;
-  };
-  const step = Math.max(1, Math.round(sr / 200)); // 5ms
-  let peak = 0;
-  for (let i = 0; i < n; i += step) {
-    const a = amp(i);
-    if (a > peak) peak = a;
-  }
-  if (peak < 0.05) return { lead: 0, tail: 0 };
-  const gate = Math.max(threshold, peak * 0.06);
-  const leadMax = Math.min(n - 1, Math.round(maxLead * sr));
-  let i = 0;
-  while (i < leadMax && amp(i) < gate) i++;
-  const leadN = Math.max(0, i - Math.round(0.03 * sr)); // 첫소리 앞 30ms는 남김
-  const tailMax = Math.min(n - 1, Math.round(maxTail * sr));
-  let j = n - 1;
-  const jStop = n - 1 - tailMax;
-  while (j > jStop && amp(j) < gate) j--;
-  const tailN = Math.max(0, (n - 1 - j) - Math.round(0.04 * sr));
-  const total = n / sr;
-  let lead = leadN / sr;
-  let tail = tailN / sr;
-  if (total - lead - tail < 0.3) return { lead: 0, tail: 0 };
-  return { lead: round(lead, 3), tail: round(tail, 3) };
-}
+export { measureSilence };
 
 export function removeVoiceClip(id, { forget = false } = {}) {
   const p = state.project;

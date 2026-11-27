@@ -229,8 +229,51 @@ export async function decodeAudio(assetId) {
   }
 }
 
-/** 오디오 파일(효과음/나레이션/BGM)을 자산으로 저장합니다. */
-export async function importAudioFile(file) {
+/**
+ * 오디오의 앞뒤 무음을 잽니다. (Gemini TTS는 앞뒤에 0.2~0.5초 무음이 붙어 오는 경우가 많음)
+ *  · 무음을 빼면 배속 없이도 자막 구간에 들어가는 경우가 많아집니다.
+ *  · 소리가 거의 없는 파일은 자르지 않습니다(말소리 잘림 방지).
+ */
+export function measureSilence(buf, { threshold = 0.02, maxLead = 0.5, maxTail = 0.6 } = {}) {
+  if (!buf || !buf.length) return { lead: 0, tail: 0 };
+  const sr = buf.sampleRate || 48000;
+  const n = buf.length;
+  const chans = [];
+  for (let c = 0; c < Math.min(2, buf.numberOfChannels || 1); c++) chans.push(buf.getChannelData(c));
+  const amp = (i) => {
+    let m = 0;
+    for (let c = 0; c < chans.length; c++) {
+      const a = Math.abs(chans[c][i]);
+      if (a > m) m = a;
+    }
+    return m;
+  };
+  let peak = 0;
+  // 최대 음량은 모든 샘플을 봅니다(5ms씩 건너보면 주기적인 소리를 놓칠 수 있음)
+  for (let i = 0; i < n; i++) {
+    const a = amp(i);
+    if (a > peak) peak = a;
+  }
+  if (peak < 0.05) return { lead: 0, tail: 0 };
+  const gate = Math.max(threshold, peak * 0.06);
+  const leadMax = Math.min(n - 1, Math.round(maxLead * sr));
+  let i = 0;
+  while (i < leadMax && amp(i) < gate) i++;
+  const leadN = Math.max(0, i - Math.round(0.03 * sr)); // 첫소리 앞 30ms는 남김
+  const tailMax = Math.min(n - 1, Math.round(maxTail * sr));
+  let j = n - 1;
+  const jStop = n - 1 - tailMax;
+  while (j > jStop && amp(j) < gate) j--;
+  const tailN = Math.max(0, (n - 1 - j) - Math.round(0.04 * sr));
+  const total = n / sr;
+  const lead = leadN / sr;
+  const tail = tailN / sr;
+  if (total - lead - tail < 0.3) return { lead: 0, tail: 0 };
+  const r3 = (x) => Math.round(x * 1000) / 1000;
+  return { lead: r3(lead), tail: r3(tail) };
+}
+
+/** 오디오 파일(효과음/나레이션/BGM)을 자산으로 저장합니다. */export async function importAudioFile(file) {
   if (!isAudioFile(file) && !isVideoFile(file)) throw new Error('오디오 파일이 아닙니다.');
   const id = uid('as');
   const rec = { id, name: file.name, kind: 'audio', mime: file.type, size: file.size, blob: file, addedAt: Date.now() };
