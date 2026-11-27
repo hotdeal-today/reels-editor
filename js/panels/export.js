@@ -970,13 +970,12 @@ async function fetchBlogInExport() {
   capStatus('글 제목·본문·사진을 가져오는 중… (최대 40초)', 'warn');
   try {
     // 4번 탭에서도 블로그 사진을 6장·8장에서 자르지 않고 전부 가져옵니다.
-    const { post, images, via, found = 0 } = await loadBlogIntoProject(url, {
+    const { post, images, via, failed = 0 } = await loadBlogIntoProject(url, {
       maxImages: 0,
       onProgress: (msg) => capStatus(msg, 'warn'),
     });
     renderExCaptions();
-    const miss = Math.max(0, (found || post.images.length) - images.length);
-    const missNote = miss ? ` (${miss}장은 내려받지 못함)` : '';
+    const missNote = failed ? ` (${failed}장은 내려받지 못해 뺐습니다)` : '';
     capStatus(`가져왔습니다 — “${post.title}” · 사진 ${images.length}장${missNote} · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, 'ok');
     emit('project', { panels: ['ai', 'export'] });
     // 카드가 아직 없으면 바로 카드까지 만들기 (URL → 카드 원스톱)

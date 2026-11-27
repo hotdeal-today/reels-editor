@@ -371,8 +371,9 @@ function drawClip(ctx, clip, local, alpha) {
     oy = ((kf.a.y + (kf.b.y - kf.a.y) * e) / 100) * DESIGN_H;
   } else if (clip.motion === 'zoomIn') scale *= 1 + 0.09 * p;
   else if (clip.motion === 'zoomOut') scale *= 1.09 - 0.09 * p;
-  else if (clip.motion === 'panLR') { scale *= 1.07; ox += (p - 0.5) * 0.07 * DESIGN_W; }
-  else if (clip.motion === 'panRL') { scale *= 1.07; ox += (0.5 - p) * 0.07 * DESIGN_W; }
+  // 담기에서는 패닝을 쓰지 않습니다 — 사진이 화면 밖으로 밀려 잘리기 때문입니다.
+  else if (clip.motion === 'panLR' && !contain) { scale *= 1.07; ox += (p - 0.5) * 0.07 * DESIGN_W; }
+  else if (clip.motion === 'panRL' && !contain) { scale *= 1.07; ox += (0.5 - p) * 0.07 * DESIGN_W; }
 
   const dw = sw * scale, dh = sh * scale;
   const dx = (DESIGN_W - dw) / 2 + ox;

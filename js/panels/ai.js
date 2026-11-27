@@ -1082,8 +1082,7 @@ async function loadBlogOneStop() {
     if (topicEl && !topicEl.value.trim()) { topicEl.value = String(post.title || '').slice(0, 60); saveSettingsFromUI(); }
     renderBlogInfo();
     emit('project', { panels: [] });
-    const miss = Math.max(0, (found || post.images.length) - images.length);
-    const missNote = miss ? ` (사진 ${found || post.images.length}장 중 ${miss}장은 내려받지 못함)` : '';
+    const missNote = failed ? ` (${failed}장은 내려받지 못해 뺐습니다)` : '';
     blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장${missNote} · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, images.length ? 'ok' : 'warn');
     // 5채널 캡션은 바로 만들기 (키 있으면 Gemini, 없으면 본문 기반)
     await makeCaptionsFromBlog({ silent: true, onlyEmpty: prevUrl === post.url });

@@ -74,7 +74,8 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
     found: post.images.length,   // 글에서 찾은 사진 수
     requested: want,             // 내려받기로 한 수
     loaded: images.length,       // 실제로 프로젝트에 들어간 수
-    failed: Math.max(0, want - images.length),
+    failed: Math.max(0, failed.length),            // 내려받기 실패
+    skipped: Math.max(0, skippedSmall.length),     // 공지 배너 등 작아서 뺐음
   };
 }
 
