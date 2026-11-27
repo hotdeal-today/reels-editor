@@ -7,7 +7,7 @@
 // 여기서는 음성마다 '시작 시각 + 배속 + 읽을 구간'을 계산합니다.
 //   ① 앞 음성이 끝난 뒤에만 시작합니다(겹침 0, 최소 여백 LAYOUT_GAP).
 //   ② 다음 자막이 뜨기 전에 끝나도록 필요한 만큼만 배속합니다(최대 LAYOUT_MAX_RATE = 1.35배).
-//   ③ 그래도 넘치면 최대 배속으로 맞추고, 남는 만큼은 다음 자막이 뜨는 자리(또는 영상 끝)에서
+//   ③ 그래도 넘치면 다음 자막이 뜬 뒤 0.3초까지는 더 들려주고(문장이 잘리지 않게), 그 뒤에도 남는 만큼만
 //      짧게 끊습니다(클릭 방지 페이드아웃은 오디오 믹스에서). 시작을 미룬 음성은 pushed 로 표시됩니다.
 //
 // 이 계산은 미리듣기(audio.js buildMix)와 MP4 내보내기(export.js → 같은 buildMix)가 함께 쓰므로
@@ -15,6 +15,7 @@
 
 export const LAYOUT_GAP = 0.04;       // 앞 음성 끝 ~ 다음 음성 시작 최소 여백(초)
 export const LAYOUT_MAX_RATE = 1.35;  // 자동 배속 상한 (1.35배 ≈ 반음 4.5개 — 목소리가 그대로 들리는 선)
+export const LAYOUT_ALLOW = 0.3;      // 다음 자막이 떠도 이만큼은 더 말하게 해 줍니다(문장이 잘리지 않게)
 export const LAYOUT_MIN_SLOT = 0.12;  // 이보다 짧은 틈은 '자리가 없는 것'으로 봅니다
 
 const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
@@ -70,19 +71,16 @@ export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate
 
     let played = speak / rate;          // 실제로 들리는 길이(초)
     let trimmed = false;
-    if (deadline && start + played > deadline) {
-      const room = deadline - start;
-      if (start + played - deadline > 0.008) {
-        played = room < 0.05 ? 0 : room;  // 최대 배속으로도 넘치면 그 자리에서 끊습니다
-        trimmed = true;
-      }
-    }
-    if (total > 0 && start + played > total) {
-      const room = total - start;         // 영상 끝을 넘는 꼬리
-      played = room < 0.05 ? 0 : room;
+    // 끝낼 수 있는 마지막 시각: 다음 자막 시각 + 0.3초(문장 끝까지 들려주려고 조금 넘겨 줍니다) / 영상 끝
+    const totalCap = total > 0 ? total : Infinity;
+    let hardEnd = totalCap;
+    if (nextAt != null) hardEnd = Math.min(hardEnd, nextAt + LAYOUT_ALLOW);
+    hardEnd = Math.max(hardEnd, Math.min(start + LAYOUT_MIN_SLOT, totalCap)); // 이미 늦었어도 최소한 이만큼은
+    if (start + played > hardEnd) {
+      played = hardEnd - start;
       trimmed = true;
     }
-    if (!(played > 0)) { plan.set(v.id, emptyPlan(v.id, start, rate)); continue; }
+    if (!(played > 0.05)) { plan.set(v.id, emptyPlan(v.id, start, rate)); continue; }
 
     const content = Math.min(speak, trimmed ? played * rate : speak); // 버퍼에서 읽을 초
     plan.set(v.id, {
