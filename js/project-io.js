@@ -89,6 +89,7 @@ export function loadProjectJson(text) {
       motion: c.motion || 'none',
       transition: c.transition === 'fade' ? 'fade' : 'cut',
       fit: c.fit === 'fit' ? 'fit' : 'fill',
+      fitSet: !!c.fitSet,
       adjust: { brightness: 0, contrast: 0, saturate: 0, ...(c.adjust || {}) },
       zoom: clamp(Number(c.zoom) || 100, 100, 250),
       offsetX: clamp(Number(c.offsetX) || 0, -50, 50),

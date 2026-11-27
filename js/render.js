@@ -1,11 +1,16 @@
 // render.js — 9:16 프레임 합성 (미리보기·내보내기 공용)
-import { state, getAsset, locate, clipDur, mosaicOf, kfOf } from './state.js';
+import { state, getAsset, locate, clipDur, mosaicOf, kfOf, clipIsContain } from './state.js';
 import { videoFor, imageFor } from './media.js';
 import { clamp, hexToRgba } from './util.js';
 
 export const DESIGN_W = 1080;
 export const DESIGN_H = 1920;
 const FADE = 0.45;
+
+// 담기(contain)일 때 사진이 들어갈 세로 띠 — 제목·배지 아래, 자막 위.
+const SAFE_GAP = 26;          // 글자와 사진 사이 여백 (1080×1920 기준 px)
+const MIN_BAND = 0.5;         // 띠가 화면 높이의 절반보다 작으면 글자를 피하지 않고 화면 전체에 맞춤
+const SAME_ASPECT = 0.04;     // 9:16과 이만큼(4%) 안쪽이면 원래 비율 그대로 꽉 채움
 let lastRects = [];
 let guideOn = false;
 let mosaicDragging = false;
@@ -227,6 +232,87 @@ function filterString(adj) {
   return `brightness(${b.toFixed(3)}) contrast(${c.toFixed(3)}) saturate(${s.toFixed(3)})`;
 }
 
+/**
+ * 글자를 피한 세로 띠(제목·배지 아래 ~ 자막 위). 화면에 실제로 들어 있는 글자만 봅니다.
+ * 띠가 너무 좁아지면(null) 화면 전체를 씁니다.
+ */
+function textSafeBand() {
+  const p = state.project;
+  if (!p) return null;
+  const bandBottom = DESIGN_H - SAFE_GAP;
+  let top = SAFE_GAP;
+  let bottom = bandBottom;
+  const blockBottom = (st, text, pos) => {
+    const lines = String(text).split('\n').length;
+    const h = st.size * 1.16 * lines + (st.bg && st.bg.on ? (st.bg.padY || 0) * 2 : 0);
+    return pos.y + h / 2;
+  };
+  const blockTop = (st, text, pos) => {
+    const lines = String(text).split('\n').length;
+    const h = st.size * 1.16 * lines + (st.bg && st.bg.on ? (st.bg.padY || 0) * 2 : 0);
+    return pos.y - h / 2;
+  };
+  let upper = 0;
+  let lower = DESIGN_H;
+  let hasUpper = false;
+  let hasLower = false;
+  for (const seg of p.segments || []) {
+    for (const key of ['title', 'badge']) {
+      const text = String(seg[key] || '').trim();
+      if (!text) continue;
+      const st = p.texts[key];
+      const pos = (seg.pos && seg.pos[key]) || { x: st.x, y: st.y };
+      upper = Math.max(upper, blockBottom(st, text, pos));
+      hasUpper = true;
+    }
+    const sub = String(seg.subtitle || '').trim();
+    if (sub) {
+      const st = p.texts.subtitle;
+      const pos = (seg.pos && seg.pos.subtitle) || { x: st.x, y: st.y };
+      lower = Math.min(lower, blockTop(st, sub, pos));
+      hasLower = true;
+    }
+  }
+  if (hasUpper) top = Math.max(top, upper + SAFE_GAP);
+  if (hasLower) bottom = Math.min(bottom, lower - SAFE_GAP);
+  if (bottom - top < DESIGN_H * MIN_BAND) return null;
+  return { top, bottom };
+}
+
+// 담기 여백용 흐린 배경 — 작게 그린 뒤 늘려서 부드럽게 번지게 합니다.
+const bgCanvas = document.createElement('canvas');
+const bgCtx = bgCanvas.getContext('2d');
+
+function drawBlurBackdrop(ctx, src, alpha) {
+  const bw = 64, bh = 114;
+  if (bgCanvas.width !== bw || bgCanvas.height !== bh) { bgCanvas.width = bw; bgCanvas.height = bh; }
+  const sw = src.videoWidth || src.naturalWidth || src.width || 0;
+  const sh = src.videoHeight || src.naturalHeight || src.height || 0;
+  if (!sw || !sh) return;
+  const k = Math.max(bw / sw, bh / sh);
+  const dw = sw * k, dh = sh * k;
+  bgCtx.setTransform(1, 0, 0, 1, 0, 0);
+  bgCtx.globalAlpha = 1;
+  bgCtx.imageSmoothingEnabled = true;
+  bgCtx.imageSmoothingQuality = 'high';
+  bgCtx.clearRect(0, 0, bw, bh);
+  try { bgCtx.drawImage(src, (bw - dw) / 2, (bh - dh) / 2, dw, dh); } catch (e) { return; }
+
+  ctx.save();
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  // 아주 작게 그린 그림을 크게 늘리면 그 자체로 흐려집니다 — 거기에 살짝만 더 번지게.
+  if ('filter' in ctx) ctx.filter = 'blur(12px)';
+  try { ctx.drawImage(bgCanvas, -DESIGN_W * 0.05, -DESIGN_H * 0.05, DESIGN_W * 1.1, DESIGN_H * 1.1); } catch (e) { /* 무시 */ }
+  ctx.filter = 'none';
+  // 원본이 살짝 도드라지도록 어둡게
+  ctx.globalAlpha = clamp(alpha, 0, 1) * 0.32;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, DESIGN_W, DESIGN_H);
+  ctx.restore();
+}
+
 function drawPlaceholder(ctx, text) {
   ctx.save();
   ctx.fillStyle = '#161b22';
@@ -259,8 +345,18 @@ function drawClip(ctx, clip, local, alpha) {
 
   const dur = clipDur(clip);
   const p = clamp(local / Math.max(0.01, dur), 0, 1);
-  const fit = clip.fit === 'fit' ? Math.min(DESIGN_W / sw, DESIGN_H / sh) : Math.max(DESIGN_W / sw, DESIGN_H / sh);
-  let scale = fit * ((clip.zoom || 100) / 100);
+
+  // 담기(Fit) — 사진 전체가 보이게 맞춤. 9:16 종이에 가까우면 화면 전체를,
+  // 카드·가로·정사각처럼 비율이 다르면 제목·자막을 피한 띠 안에 넣고 남는 자리는
+  // 같은 사진을 흐리게 깔아 채웁니다(잘림 없음).
+  const contain = clipIsContain(clip);
+  const sameAspect = sw > 0 && sh > 0 && Math.abs((sw / sh) - (DESIGN_W / DESIGN_H)) / (DESIGN_W / DESIGN_H) <= SAME_ASPECT;
+  const band = contain && !sameAspect ? (textSafeBand() || { top: 0, bottom: DESIGN_H }) : { top: 0, bottom: DESIGN_H };
+  const bandH = Math.max(1, band.bottom - band.top);
+  const base = contain
+    ? Math.min(DESIGN_W / sw, bandH / sh)
+    : Math.max(DESIGN_W / sw, DESIGN_H / sh);
+  let scale = base * ((clip.zoom || 100) / 100);
   let ox = ((clip.offsetX || 0) / 100) * DESIGN_W;
   let oy = ((clip.offsetY || 0) / 100) * DESIGN_H;
 
@@ -270,7 +366,7 @@ function drawClip(ctx, clip, local, alpha) {
   if (kf.on) {
     const e = kf.ease ? p * p * (3 - 2 * p) : p; // 카메라처럼 천천히 출발·도착
     const z = kf.a.zoom + (kf.b.zoom - kf.a.zoom) * e;
-    scale = fit * (z / 100);
+    scale = base * (z / 100);
     ox = ((kf.a.x + (kf.b.x - kf.a.x) * e) / 100) * DESIGN_W;
     oy = ((kf.a.y + (kf.b.y - kf.a.y) * e) / 100) * DESIGN_H;
   } else if (clip.motion === 'zoomIn') scale *= 1 + 0.09 * p;
@@ -280,7 +376,12 @@ function drawClip(ctx, clip, local, alpha) {
 
   const dw = sw * scale, dh = sh * scale;
   const dx = (DESIGN_W - dw) / 2 + ox;
-  const dy = (DESIGN_H - dh) / 2 + oy;
+  const dy = contain
+    ? band.top + (bandH - dh) / 2 + oy
+    : (DESIGN_H - dh) / 2 + oy;
+
+  // 사진이 화면을 다 못 채우면 그 자리를 같은 사진의 흐린 배경으로 채웁니다.
+  if (contain && (dw < DESIGN_W - 1 || dh < DESIGN_H - 1)) drawBlurBackdrop(ctx, src, alpha);
 
   ctx.save();
   ctx.globalAlpha = clamp(alpha, 0, 1);

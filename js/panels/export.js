@@ -3,7 +3,7 @@ import { $, clamp, emit, downloadBlob, escapeHtml, fmtSec } from '../util.js';
 import { state, totalDuration, persist } from '../state.js';
 import { exportVideo, detectSupport, saveThumbnail } from '../export.js';
 import {
-  CAROUSEL_COUNTS, CAROUSEL_DEFAULT_COUNT, CAROUSEL_RATIOS, CARD_POSITIONS, TEXT_SWATCHES, ACCENT_SWATCHES,
+  CAROUSEL_COUNTS, CAROUSEL_DEFAULT_COUNT, CAROUSEL_MAX_COUNT, CAROUSEL_RATIOS, CARD_POSITIONS, TEXT_SWATCHES, ACCENT_SWATCHES,
   getCarousel, saveCarousel, cardsFromTimeline, cardsFromImages, renderCards, renderCard, releaseCards,
   cardSignature, carouselFileName, patchCard, addCardFromPool, removeCardById, projectPhotos, findCard,
 } from '../carousel.js';
@@ -68,14 +68,22 @@ export function initExportPanel(el) {
     <div class="sec" data-sec="carousel">
       <div class="sec-head">🖼️ 캐러셀 카드 <span class="count">만들고 · 고치고 · 저장</span></div>
       <div class="sec-note">
-        블로그 사진이나 지금 컷에서 <b>대표 카드 + 장면 카드 4~6장</b>을 자동으로 만듭니다.
+        블로그 사진이나 지금 컷에서 <b>대표 카드 + 장면 카드</b>를 자동으로 만듭니다.
+        장수는 <b>4~10장 또는 불러온 사진 전체</b>로 고르고, <b>＋</b>로 카드를 더 붙일 수도 있습니다.
         카드를 누르면 <b>제목·부제·위치·글자 크기·색·사진</b>을 그 자리에서 고칠 수 있고, 고친 그대로 JPG·ZIP으로 저장됩니다.
       </div>
       <div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
         <label style="min-width:52px">장수</label>
         <div class="seg-btns grow" id="carCount">
           ${CAROUSEL_COUNTS.map((n) => `<button type="button" data-car-count="${n}">${n}장</button>`).join('')}
+          <button type="button" id="carCountAll">전체</button>
         </div>
+      </div>
+      <div class="row" style="gap:6px;align-items:center;margin-bottom:6px">
+        <label style="min-width:52px">직접</label>
+        <input type="number" id="carCountInput" class="grow" min="2" max="40" step="1" value="5" style="max-width:96px" aria-label="캐러셀 장수">
+        <button class="btn tiny" id="carCountApply" type="button">이 장수로</button>
+        <span id="carCountHint" style="font-size:10.5px;color:var(--muted)"></span>
       </div>
       <div class="seg-btns" id="carRatio" style="margin-bottom:8px">
         <button type="button" data-car-ratio="4:5">4:5 피드 (1080×1350)</button>
@@ -357,12 +365,16 @@ function bindCarousel() {
     }
   });
   $('#carCount', pane).addEventListener('click', async (e) => {
+    if (e.target.closest('#carCountAll')) { await applyAllPhotos(); return; }
     const b = e.target.closest('[data-car-count]');
     if (!b) return;
-    state.project.export.carouselCount = Number(b.dataset.carCount) || CAROUSEL_DEFAULT_COUNT;
-    persist();
-    syncCarCount();
-    await applyCount(carCount());
+    await setCarCount(Number(b.dataset.carCount));
+  });
+  const applyBtn = $('#carCountApply', pane);
+  if (applyBtn) applyBtn.addEventListener('click', () => setCarCount(Number($('#carCountInput', pane).value)));
+  const countInput = $('#carCountInput', pane);
+  if (countInput) countInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); setCarCount(Number(countInput.value)); }
   });
   $('#carFromClips', pane).addEventListener('click', () => buildFromClips());
   $('#carFromBlog', pane).addEventListener('click', () => buildFromBlog());
@@ -479,6 +491,46 @@ function syncCarRatio() {
 function syncCarCount() {
   const cur = carCount();
   pane.querySelectorAll('[data-car-count]').forEach((b) => b.classList.toggle('on', Number(b.dataset.carCount) === cur));
+  const input = $('#carCountInput', pane);
+  if (input && document.activeElement !== input) input.value = String(cur);
+  const hint = $('#carCountHint', pane);
+  if (hint) {
+    const pool = projectPhotos().length;
+    hint.textContent = pool ? `사진 ${pool}장 불러옴` : '';
+  }
+  const allBtn = $('#carCountAll', pane);
+  if (allBtn) {
+    const pool = projectPhotos().length;
+    allBtn.textContent = pool ? `전체 (${pool}장)` : '전체';
+    allBtn.classList.toggle('on', pool >= 2 && cur === clamp(pool, 2, CAROUSEL_MAX_COUNT));
+  }
+}
+
+/** 장수를 정해 카드에 반영합니다(모자라면 사진을 더 붙이고, 넘치면 뒤에서 자름). */
+async function setCarCount(n) {
+  state.project.export.carouselCount = clamp(Math.round(Number(n) || CAROUSEL_DEFAULT_COUNT), 2, CAROUSEL_MAX_COUNT);
+  persist();
+  syncCarCount();
+  await applyCount(carCount());
+}
+
+/** 불러온 사진 전체를 카드로 — 카드가 없으면 블로그 사진(없으면 지금 컷)으로 바로 만듭니다. */
+async function applyAllPhotos() {
+  const pool = projectPhotos().length;
+  const want = clamp(pool || 2, 2, CAROUSEL_MAX_COUNT);
+  state.project.export.carouselCount = want;
+  persist();
+  syncCarCount();
+  const store = carStore();
+  if (!store || !store.cards.length) {
+    const blog = loadBlogStore();
+    if (blog && (blog.images || []).length) { await buildFromBlog(); return; }
+    if (state.project.clips.length) { await buildFromClips(); return; }
+    emit('toast', { msg: '먼저 블로그 사진을 불러오거나 컷을 추가해 주세요.', type: 'warn' });
+    return;
+  }
+  await applyCount(carCount());
+  setCarNote(`사진 ${projectPhotos().length}장 중 ${carStore().cards.length}장으로 맞췄습니다.`);
 }
 
 function setCarNote(msg) {
@@ -917,18 +969,25 @@ async function fetchBlogInExport() {
   btn.textContent = '가져오는 중…';
   capStatus('글 제목·본문·사진을 가져오는 중… (최대 40초)', 'warn');
   try {
-    const { post, images, via } = await loadBlogIntoProject(url, {
-      maxImages: 8,
+    // 4번 탭에서도 블로그 사진을 6장·8장에서 자르지 않고 전부 가져옵니다.
+    const { post, images, via, found = 0 } = await loadBlogIntoProject(url, {
+      maxImages: 0,
       onProgress: (msg) => capStatus(msg, 'warn'),
     });
     renderExCaptions();
-    capStatus(`가져왔습니다 — “${post.title}” · 사진 ${images.length}장 · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, 'ok');
+    const miss = Math.max(0, (found || post.images.length) - images.length);
+    const missNote = miss ? ` (${miss}장은 내려받지 못함)` : '';
+    capStatus(`가져왔습니다 — “${post.title}” · 사진 ${images.length}장${missNote} · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, 'ok');
     emit('project', { panels: ['ai', 'export'] });
     // 카드가 아직 없으면 바로 카드까지 만들기 (URL → 카드 원스톱)
     const store = carStore();
     if ((!store || !store.cards.length) && images.length) {
+      // 카드가 아직 없으면 불러온 사진 전부를 카드로 만들어 4번 탭에서 바로 보이게 합니다.
+      state.project.export.carouselCount = clamp(images.length, 2, CAROUSEL_MAX_COUNT);
+      persist();
       await buildFromBlog();
     }
+    syncCarCount();
     // 캡션이 비어 있으면 바로 만들기
     const cur = loadCaptionState();
     const hasCaption = CAPTION_CHANNELS.some((ch) => (cur.captions[ch.id] || '').trim());

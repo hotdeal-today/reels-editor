@@ -1,6 +1,6 @@
 // panels/clips.js — 탭1: 컷 편집
 import { $, $$, clamp, emit, fmtSec, escapeHtml } from '../util.js';
-import { state, getAsset, clipDur, totalDuration, persist, ensureSegments, mixDirty, mosaicOf, kfOf, KF_DEFAULT } from '../state.js';
+import { state, getAsset, clipDur, totalDuration, persist, ensureSegments, mixDirty, mosaicOf, kfOf, KF_DEFAULT, clipIsContain } from '../state.js';
 import { importMediaFile } from '../media.js';
 import { seek, requestRender } from '../player.js';
 import { forgetAsset, isAssetUsed } from '../assets.js';
@@ -678,10 +678,12 @@ export function renderDetail() {
       <div class="row">
         <label>화면 맞춤</label>
         <select class="grow" data-field="fit">
-          <option value="fill"${clip.fit === 'fill' ? ' selected' : ''}>꽉 채우기 (Fill)</option>
-          <option value="fit"${clip.fit === 'fit' ? ' selected' : ''}>전체 맞춤 (Fit)</option>
+          <option value="fill"${clipIsContain(clip) ? '' : ' selected'}>꽉 채우기 (Fill)</option>
+          <option value="fit"${clipIsContain(clip) ? ' selected' : ''}>안 잘리게 축소 (Fit)</option>
         </select>
       </div>
+      ${clipIsContain(clip) ? '<div class="sec-note" style="margin:0 0 8px">사진 전체가 보이게 축소하고, 남는 자리는 같은 사진을 흐리게 깔아 채웁니다. 제목·자막과 겹치지 않는 자리에 놓습니다.</div>' : ''}
+      ${!clip.fitSet && clip.kind === 'image' && clipIsContain(clip) ? '<div class="sec-note" style="margin:0 0 8px;color:var(--muted)">카드·가로·정사각 사진이라 자동으로 맞춤에 두었습니다. 꽉 채우려면 위에서 바꾸세요.</div>' : ''}
       ${rowSlider('확대', 'zoom', clip.zoom ?? 100, 100, 250, 1, '%', '', kf.on ? ' disabled' : '')}
       <div class="row">
         <label>위치</label>
@@ -767,6 +769,7 @@ function applyField(clip, field, value) {
     clip.adjust[field] = clamp(Number(value), -50, 50);
   } else if (field === 'motion' || field === 'transition' || field === 'fit') {
     clip[field] = value;
+    if (field === 'fit') clip.fitSet = true; // 직접 고른 값은 사진 비율과 상관없이 그대로
   }
 }
 

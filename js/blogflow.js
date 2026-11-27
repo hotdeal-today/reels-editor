@@ -10,13 +10,17 @@ import { saveCaptionState } from './captions.js';
  * 블로그 글을 가져와 ① 사진을 자산으로 저장 ② 본문·제목을 캡션 저장소에 기록합니다.
  * @returns {Promise<{post:object, images:{assetId,caption,section}[], via:string}>}
  */
-export async function loadBlogIntoProject(url, { maxImages = 8, onProgress = () => {}, setName = true } = {}) {
+export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () => {}, setName = true } = {}) {
   const post = await fetchBlogPost(url, { onProgress });
-  onProgress(`사진 ${Math.min(maxImages, post.images.length)}장 내려받는 중…`);
+  // maxImages가 0/없음이면 글에 있는 사진을 전부 받습니다(6장·8장 잘림 없음).
+  const cap = Number(maxImages) > 0 ? Math.floor(Number(maxImages)) : 0;
+  const want = cap > 0 ? Math.min(cap, post.images.length) : post.images.length;
+  onProgress(`사진 ${want}장 내려받는 중…`);
   const files = await fetchBlogImages(post.images, {
-    limit: maxImages,
+    limit: cap,
     onProgress: (i, n) => { if (i < n) onProgress(`사진 ${i + 1}/${n} 내려받는 중…`); },
   });
+  const failed = files.failed || [];
   const images = [];
   for (const f of files) {
     try {
@@ -45,6 +49,8 @@ export async function loadBlogIntoProject(url, { maxImages = 8, onProgress = () 
     images,
     at: Date.now(),
   });
+  const skipped = want - images.length;
+  if (skipped > 0) console.warn(`[blog] 사진 ${skipped}장을 프로젝트에 넣지 못했습니다`, { failed, skipped });
   saveCaptionState({ url: post.url, body: post.body, title });
   if (setName && state.project) {
     const cur = state.project.name || '';
@@ -53,7 +59,13 @@ export async function loadBlogIntoProject(url, { maxImages = 8, onProgress = () 
       persist();
     }
   }
-  return { post, images, via: post.via || '' };
+  return {
+    post, images, via: post.via || '',
+    found: post.images.length,   // 글에서 찾은 사진 수
+    requested: want,             // 내려받기로 한 수
+    loaded: images.length,       // 실제로 프로젝트에 들어간 수
+    failed: Math.max(0, want - images.length),
+  };
 }
 
 export { loadBlogStore };

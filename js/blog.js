@@ -357,20 +357,23 @@ async function fetchOneImage(url, timeout = 16000) {
   const naverImg = /pstatic\.net/i.test(url);
   const tries = naverImg ? [encUrl, encUrl2, (u) => u] : [(u) => u, encUrl, encUrl2];
   let lastErr = null;
-  for (const make of tries) {
-    const href = make(url);
-    try {
-      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
-      const res = await fetch(href, { mode: 'cors', credentials: 'omit', signal: ctrl ? ctrl.signal : undefined });
-      if (timer) clearTimeout(timer);
-      if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
-      const blob = await res.blob();
-      if (!blob || blob.size < 1500) { lastErr = new Error('너무 작은 이미지'); continue; }
-      const type = (blob.type || '').startsWith('image/') ? blob.type : 'image/jpeg';
-      return new Blob([blob], { type });
-    } catch (e) {
-      lastErr = e;
+  // 한 번 실패는 프록시가 잠깐 비었을 수 있어 한 바퀴 더 돌립니다.
+  for (let round = 0; round < 2; round++) {
+    for (const make of tries) {
+      const href = make(url);
+      try {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
+        const res = await fetch(href, { mode: 'cors', credentials: 'omit', signal: ctrl ? ctrl.signal : undefined });
+        if (timer) clearTimeout(timer);
+        if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+        const blob = await res.blob();
+        if (!blob || blob.size < 1500) { lastErr = new Error('너무 작은 이미지'); continue; }
+        const type = (blob.type || '').startsWith('image/') ? blob.type : 'image/jpeg';
+        return new Blob([blob], { type });
+      } catch (e) {
+        lastErr = e;
+      }
     }
   }
   throw lastErr || new Error('사진을 받지 못했습니다.');
@@ -384,10 +387,16 @@ function fileNameFor(url, index) {
   return `blog_${String(index + 1).padStart(2, '0')}_${base}`;
 }
 
-/** 글 사진들을 File 객체로 내려받습니다. (실패한 사진은 건너뜀) */
-export async function fetchBlogImages(images, { limit = 8, onProgress = () => {} } = {}) {
+/**
+ * 글 사진들을 File 객체로 내려받습니다.
+ * limit을 주지 않거나 0이면 글에 있는 사진을 전부 받습니다. (실패한 사진은 failed에 모음)
+ */
+export async function fetchBlogImages(images, { limit = 0, onProgress = () => {} } = {}) {
   const out = [];
-  const list = (images || []).slice(0, Math.max(1, limit));
+  const all = images || [];
+  const want = Number(limit) > 0 ? Math.min(Math.floor(Number(limit)), all.length) : all.length;
+  const list = all.slice(0, want);
+  const failed = [];
   for (let i = 0; i < list.length; i++) {
     const img = list[i];
     onProgress(i, list.length, img);
@@ -396,10 +405,16 @@ export async function fetchBlogImages(images, { limit = 8, onProgress = () => {}
       const file = new File([blob], fileNameFor(img.url, i), { type: blob.type });
       out.push({ ...img, file, size: blob.size });
     } catch (e) {
-      // 실패한 사진은 다음 사진으로
+      failed.push({ url: img.url, message: (e && e.message) || '실패' });
     }
   }
   onProgress(list.length, list.length, null);
+  out.failed = failed;
+  out.requested = list.length;
+  if (failed.length) {
+    // 무엇이 왜 빠졌는지 콘솔에 남겨 둡니다(화면 문구에는 개수만).
+    console.warn(`[blog] 사진 ${failed.length}장을 받지 못했습니다`, failed);
+  }
   return out;
 }
 

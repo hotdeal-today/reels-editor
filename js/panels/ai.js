@@ -69,18 +69,23 @@ export function initAiPanel(el) {
             <option value="20">20초</option>
           </select>
           <label style="flex:0 0 auto">카드</label>
-          <select id="blogCarCount" style="flex:1 1 70px">
+          <select id="blogCarCount" style="flex:1 1 80px">
             <option value="4">4장</option>
             <option value="5" selected>5장</option>
             <option value="6">6장</option>
+            <option value="8">8장</option>
+            <option value="10">10장</option>
+            <option value="0">전체</option>
           </select>
         </div>
         <div class="row"><label style="flex:0 0 auto">사진 수</label>
           <select id="blogMax" style="flex:1 1 80px">
+            <option value="0" selected>전체</option>
             <option value="4">4장</option>
             <option value="6">6장</option>
-            <option value="8" selected>8장</option>
+            <option value="8">8장</option>
             <option value="10">10장</option>
+            <option value="12">12장</option>
           </select>
           <label class="switch" style="flex:0 0 auto;margin-left:auto"><input type="checkbox" id="blogReplace" checked> 기존 컷 새로 만들기</label>
         </div>
@@ -1058,8 +1063,9 @@ async function loadBlogOneStop() {
   setBlogBusy(true);
   blogStatus('글 제목·본문·사진을 가져오는 중… (최대 40초)', 'warn');
   try {
-    const maxImages = Number($('#blogMax', pane).value) || 8;
-    const { post, images, via } = await loadBlogIntoProject(url, {
+    const picked = Number($('#blogMax', pane).value);
+    const maxImages = Number.isFinite(picked) ? Math.max(0, picked) : 0; // 0 = 전체
+    const { post, images, via, found = 0, failed = 0 } = await loadBlogIntoProject(url, {
       maxImages,
       onProgress: (msg) => blogStatus(msg, 'warn'),
     });
@@ -1076,7 +1082,9 @@ async function loadBlogOneStop() {
     if (topicEl && !topicEl.value.trim()) { topicEl.value = String(post.title || '').slice(0, 60); saveSettingsFromUI(); }
     renderBlogInfo();
     emit('project', { panels: [] });
-    blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장 · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, images.length ? 'ok' : 'warn');
+    const miss = Math.max(0, (found || post.images.length) - images.length);
+    const missNote = miss ? ` (사진 ${found || post.images.length}장 중 ${miss}장은 내려받지 못함)` : '';
+    blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장${missNote} · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, images.length ? 'ok' : 'warn');
     // 5채널 캡션은 바로 만들기 (키 있으면 Gemini, 없으면 본문 기반)
     await makeCaptionsFromBlog({ silent: true, onlyEmpty: prevUrl === post.url });
   } catch (e) {
@@ -1253,15 +1261,16 @@ async function makeReelFromBlog(blog) {
   const imageDur = Number($('#blogImageDur', pane).value) || 2.6;
   const target = Number($('#blogTotal', pane).value) || 18;
   const replace = $('#blogReplace', pane).checked;
-  const images = (blog.images || []).slice(0, 10);
+  // 불러온 사진을 자르지 않고 전부 컷으로 넣습니다.
+  const images = (blog.images || []).slice();
   if (!images.length) throw new Error('블로그 사진이 없어 릴스를 만들지 못했습니다.');
 
   if (replace) state.project.clips = [];
-  const per = clamp(target / images.length, 1.2, 5);
+  const per = clamp(target / images.length, 0.8, 5);
   for (const img of images) {
     const asset = getAsset(img.assetId);
     if (!asset) continue;
-    const clip = makeClip({ id: asset.id, kind: 'image', name: asset.name });
+    const clip = makeClip({ id: asset.id, kind: 'image', name: asset.name, width: asset.width, height: asset.height });
     clip.duration = per;
     clip.trimOut = per;
     state.project.clips.push(clip);
@@ -1312,7 +1321,9 @@ async function makeReelFromBlog(blog) {
 }
 
 async function makeCarouselFromBlog(blog) {
-  const count = Number($('#blogCarCount', pane).value) || 5;
+  const picked = Number($('#blogCarCount', pane).value);
+  // 0 = 불러온 사진 전체
+  const count = Number.isFinite(picked) && picked > 0 ? picked : (blog.images || []).length;
   const ratio = state.project.export.carouselRatio || '4:5';
   const made = cardsFromImages({ images: blog.images, title: blog.title, count });
   if (!made.cards.length) throw new Error('블로그 사진으로 카드를 만들지 못했습니다.');

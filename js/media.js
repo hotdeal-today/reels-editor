@@ -106,12 +106,20 @@ function probeDuration(v) {
   });
 }
 
+/** 9:16이 아닌 사진(카드·가로·정사각)은 처음부터 '담기'로 — 잘리지 않게. */
+export function autoFitFor(width, height) {
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  if (!w || !h) return 'fill';
+  return Math.abs((w / h) - (9 / 16)) / (9 / 16) > 0.05 ? 'fit' : 'fill';
+}
+
 export function makeClip(rec) {
   if (rec.kind === 'image') {
     return {
       id: uid('clip'), kind: 'image', assetId: rec.id, name: rec.name,
       duration: 3, trimIn: 0, trimOut: 3, speed: 1, volume: 100, muted: true,
-      motion: 'none', transition: 'cut', fit: 'fill',
+      motion: 'none', transition: 'cut', fit: autoFitFor(rec.width, rec.height), fitSet: false,
       adjust: { brightness: 0, contrast: 0, saturate: 0 },
       zoom: 100, offsetX: 0, offsetY: 0,
     };

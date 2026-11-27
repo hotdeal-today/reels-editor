@@ -9,14 +9,16 @@ import {
 import { videoFor, imageFor, seekVideo, waitVideoReady } from './media.js';
 import { applyMosaic, DESIGN_W, DESIGN_H } from './render.js';
 import { clamp, uid, hexToRgba, fmtSec } from './util.js';
+import { loadBlogStore } from './blog.js';
 
 export const CAROUSEL_RATIOS = {
   '4:5': { w: 1080, h: 1350, label: '4:5 피드' },
   '9:16': { w: 1080, h: 1920, label: '9:16 세로' },
 };
 
-export const CAROUSEL_COUNTS = [4, 5, 6];
+export const CAROUSEL_COUNTS = [4, 5, 6, 8, 10];
 export const CAROUSEL_DEFAULT_COUNT = 5;
+export const CAROUSEL_MAX_COUNT = 40;
 
 export const CARD_POSITIONS = [
   { id: 'top', label: '상단', y: 16 },
@@ -140,7 +142,7 @@ function trimTo(text, max) {
 export function planCarouselMoments(count) {
   const p = state.project;
   const clips = (p.clips || []).slice(0, 40);
-  const want = clamp(Math.round(Number(count) || CAROUSEL_DEFAULT_COUNT), 2, 10);
+  const want = clamp(Math.round(Number(count) || CAROUSEL_DEFAULT_COUNT), 2, CAROUSEL_MAX_COUNT);
   if (!clips.length) return { moments: [], requested: want, available: 0, limited: false, notice: '' };
 
   const total = totalDuration();
@@ -209,7 +211,7 @@ export function planCarouselMoments(count) {
     const photoCount = clips.filter((c) => c.kind === 'image').length;
     const hasVideo = clips.some((c) => c.kind === 'video');
     if (!hasVideo && photoCount) {
-      notice = `서로 다른 사진이 ${available}장뿐이라 ${available}장으로 만들었습니다. 사진을 더 넣으면 4~6장을 채울 수 있어요.`;
+      notice = `서로 다른 사진이 ${available}장뿐이라 ${available}장으로 만들었습니다. 사진을 더 넣으면 원하는 장수까지 채울 수 있어요.`;
     } else if (photoCount) {
       notice = `서로 다른 장면이 ${available}개뿐이라 ${available}장으로 만들었습니다(같은 사진은 두 번 넣지 않았습니다).`;
     } else {
@@ -293,7 +295,7 @@ function coverHeadline(title) {
 export function cardsFromImages({ images = [], title = '', count = CAROUSEL_DEFAULT_COUNT } = {}) {
   const pool = (images || []).filter((it) => it && it.assetId);
   if (!pool.length) return { cards: [], limited: true, notice: '사진을 불러오지 못해 카드를 만들 수 없습니다.' };
-  const want = clamp(Math.round(Number(count) || CAROUSEL_DEFAULT_COUNT), 2, 10);
+  const want = clamp(Math.round(Number(count) || CAROUSEL_DEFAULT_COUNT), 2, CAROUSEL_MAX_COUNT);
   const cards = [];
   const cover = pool[0];
   const coverParts = captionParts(cover.caption);
@@ -339,6 +341,18 @@ export function projectPhotos() {
     const asset = getAsset(c.assetId);
     out.push({ assetId: c.assetId, name: (asset && asset.name) || `사진 ${i + 1}`, thumb: (asset && asset.thumb) || '' });
   });
+  // 블로그에서 불러온 사진 — 릴스 컷을 만들지 않아도 카드 사진으로 고를 수 있게 합니다.
+  const blog = loadBlogStore();
+  for (const it of (blog && blog.images) || []) {
+    if (!it || !it.assetId || seen.has(it.assetId)) continue;
+    seen.add(it.assetId);
+    const asset = getAsset(it.assetId);
+    out.push({
+      assetId: it.assetId,
+      name: (asset && asset.name) || it.name || '블로그 사진',
+      thumb: (asset && asset.thumb) || '',
+    });
+  }
   return out;
 }
 

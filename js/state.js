@@ -110,6 +110,24 @@ export function addAssetRecord(rec) {
   return full;
 }
 export function getAsset(id) { return state.assets.get(id) || null; }
+
+/**
+ * 이 클립을 '담기(Fit)'로 그릴지 정합니다.
+ *  · 사용자가 화면 맞춤을 직접 고른 클립(fitSet)은 그 선택을 그대로 따릅니다.
+ *  · 그 전에 만든 클립은 사진 비율을 보고 정합니다 — 9:16이 아닌 사진(카드·가로·정사각)은
+ *    잘리지 않게 담기, 9:16에 가까운 사진·영상은 꽉 채우기.
+ */
+export function clipIsContain(clip) {
+  if (!clip) return false;
+  if (clip.fitSet) return clip.fit === 'fit';
+  if (clip.fit === 'fit') return true;
+  if (clip.kind !== 'image') return false;
+  const a = getAsset(clip.assetId);
+  const w = Number(a && a.width) || 0;
+  const h = Number(a && a.height) || 0;
+  if (!w || !h) return false;
+  return Math.abs((w / h) - (9 / 16)) / (9 / 16) > 0.05;
+}
 export function removeAsset(id) {
   const a = state.assets.get(id);
   if (!a) return;
