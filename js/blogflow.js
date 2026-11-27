@@ -1,6 +1,6 @@
 // blogflow.js — 블로그 URL 하나로 '글 + 사진'을 프로젝트에 담는 공통 흐름
 //  AI 세팅 탭과 내보내기 탭이 같은 함수를 써서 상태가 어긋나지 않게 합니다.
-import { state, persist } from './state.js';
+import { state, persist, getAsset } from './state.js';
 import { importMediaFile } from './media.js';
 import { forgetAsset } from './assets.js';
 import { fetchBlogPost, fetchBlogImages, saveBlogStore, loadBlogStore } from './blog.js';
@@ -21,10 +21,27 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
     onProgress: (i, n) => { if (i < n) onProgress(`사진 ${i + 1}/${n} 내려받는 중…`); },
   });
   const failed = files.failed || [];
+  // 같은 글을 다시 불러올 때 사진을 또 새로 넣으면 카드 사진 목록에 같은 사진이 두 번 생깁니다.
+  // 같은 주소의 사진은 앞서 받아 둔 자산을 그대로 씁니다.
+  const prev = loadBlogStore();
+  const reuse = new Map();
+  const reuseByName = new Map();
+  if (prev && prev.url && prev.url === post.url) {
+    for (const it of prev.images || []) {
+      if (!it || !it.assetId || !getAsset(it.assetId)) continue;
+      if (it.url) reuse.set(it.url, it.assetId);
+      if (it.name) reuseByName.set(it.name, it.assetId);
+    }
+  }
   const images = [];
   const skippedSmall = [];
   for (const f of files) {
     try {
+      const known = (f.url && reuse.get(f.url)) || (f.file && reuseByName.get(f.file.name)) || '';
+      if (known && getAsset(known)) {
+        images.push({ assetId: known, caption: f.caption || '', section: f.section || '', name: getAsset(known).name || '', url: f.url });
+        continue;
+      }
       const { asset } = await importMediaFile(f.file);
       // 너무 작은 이미지(공지 배너·버튼 등)는 카드·컷에서 빼기
       const w = asset.width || 0;
@@ -39,6 +56,7 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
         caption: f.caption || '',
         section: f.section || '',
         name: asset.name || '',
+        url: f.url || '',
       });
     } catch (e) { /* 사진 하나 실패는 넘어감 */ }
   }
