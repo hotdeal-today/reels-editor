@@ -259,6 +259,9 @@ export function buildPrompt(topic, tempo, opts = {}) {
   const kind = opts.kind || topicKindOf({ title: topic, body: opts.body || '', topic });
   const cutBlock = opts.cuts && opts.cuts.length ? cutContextBlock(opts.cuts) : '';
   const cutCount = opts.cuts && opts.cuts.length ? opts.cuts.length : (state.project.clips || []).length;
+  const timeline = cutBlock
+    ? `전체 길이 ${round(totalDuration(), 1)}초, 클립 ${cutCount}개. 자막은 클립(사진) 1개당 한 줄 — 정확히 ${cutCount}개.`
+    : contextLine(tempo);
   return [
     '너는 한국 여행·리빙 블로그 운영자가 쓰는 9:16 세로 릴스(인스타 릴스·네이버 클립) 자막 작가다.',
     '첨부한 사진/영상 프레임을 보고, 아래 JSON 스키마에 맞는 편집 세팅을 하나만 출력한다.',
@@ -270,7 +273,7 @@ export function buildPrompt(topic, tempo, opts = {}) {
     `- segments는 정확히 ${cutCount}개. 각 구간에 "cut" 번호(1부터)를 붙이고, cut 1은 1번 사진, cut 2는 2번 사진의 자막이다. 사진 순서를 바꾸지 않는다.`,
     '- title: 0~3초 후킹 한 줄(13자 이내). 숙소·여행은 지역 반전·거리+결과·공간 포인트, 상품은 숫자·문제·궁금증.',
     '- badge: 6자 이내, 사실만(BEST·총정리·필수템 같은 평가어 금지).',
-    `- subtitle: 한 줄 4~${CAPTION_LIMIT}자, 1줄, 해요체 구어체. 그 컷 사진의 포인트 하나만. 두 정보를 한 줄에 넣지 않는다.`,
+    '- subtitle: 한 줄 4~13자, 1줄, 해요체 구어체. 그 컷 사진의 포인트 하나만. 두 정보를 한 줄에 넣지 않는다.',
     '- segments: 0초부터 전체 길이 끝까지 빈틈없이. start/end는 초 단위 숫자이고 서로 겹치거나 빈 구간을 두지 않는다.',
     '- 각 자막은 연결어미(~고/~서/~며/~면)나 조사(~까지)로 끝내 이어 읽히게 한다. 컷마다 완결문·라벨 금지.',
     '- 화면에서 확인되는 사실(가격·기종·색·개수·거리)만 쓴다. 프레임에서 확인되지 않은 수치·효능은 쓰지 않는다.',
@@ -281,7 +284,7 @@ export function buildPrompt(topic, tempo, opts = {}) {
     '- design: 흰 글씨+검정 외곽선 레퍼런스 톤은 ref, 밝고 정보성 글은 neon, 깔끔한 제품컷은 clean, 임팩트가 필요하면 bold.',
     '',
     '[지금 타임라인]',
-    contextLine(tempo),
+    timeline,
     topic ? `[주제] ${topic}` : '[주제] (첨부한 사진/영상에서 추론)',
     cutBlock,
     '',
@@ -307,7 +310,7 @@ export function buildChatPrompt(topic, tempo, opts = {}) {
     '',
     '[요청]',
     '1) 제목·배지: 0~3초에 시선을 끄는 한국어 한 줄(제목 13자, 배지 6자 이내). 평가어(BEST·총정리·필수템) 금지',
-    `2) 구간별 자막: 정확히 ${cutCount}개. cut 번호를 붙이고, cut N은 N번 사진의 포인트 한 줄. 4~${CAPTION_LIMIT}자, 연결어미로 끝내 이어 읽히게`,
+    `2) 구간별 자막: 정확히 ${cutCount}개. cut 번호를 붙이고, cut N은 N번 사진의 포인트 한 줄. 4~13자, 연결어미로 끝내 이어 읽히게`,
     '3) 마무리: 마지막 1~2컷에 CTA 하나(저장·댓글 키워드). 그 앞에 손해 방지 한 줄',
     '4) 효과음 추천: 종류 + 넣을 초 (jjan=짠, pop=뽕, swish=쉭, dingdong=딩동, ddoong=두둥, tadak=타닥, beep=삐, shutter=찰칵)',
     '5) design: 흰 글씨+검정 외곽선 레퍼런스 톤이면 ref',
