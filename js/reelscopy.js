@@ -17,12 +17,6 @@ const MIN_LEN = 4;
 const NO_SPACE = /\s/g;
 export function noSpace(s) { return String(s || '').replace(NO_SPACE, ''); }
 
-function vowelFinal(ch) {
-  const c = String(ch || '').charCodeAt(0);
-  if (c >= 0xac00 && c <= 0xd7a3) return (c - 0xac00) % 28 === 0;
-  return false;
-}
-
 /** 문장부호로 나눈 뒤 연결어미 뒤에서 한 번 더 끊습니다. (\"…있고 그 욕실에\" → \"…있고\" + \"그 욕실에\") */
 export function clauseSplit(text) {
   const raw = String(text || '')
@@ -266,9 +260,15 @@ const keyOf = (line) => noSpace(line).slice(0, 5);
  * 자막으로 약한 줄인지 — 평가어, 가격 나열, 또는 핵심 매력 없는 짧은 라벨.
  *  v11: "바다 보면서 노천탕" 같은 짧은 명사구는 좋은 자막이라 약한 줄로 보지 않습니다.
  */
+/** 나이·체크인·전화 문의 같은 자잘한 이용 규정 줄인지 (자막에서 빼는 줄) */
+export function isTriviaLine(line) {
+  return TRIVIA.test(String(line || ''));
+}
+
 export function isWeakCaption(line) {
   const t = String(line || '').trim();
   if (!t) return true;
+  if (TRIVIA.test(t)) return true;
   const chk = checkCaption(t);
   if (chk.evalWord) return true;
   if ((t.match(/\d+\s*만?\s*원/g) || []).length >= 2) return true;
@@ -782,6 +782,7 @@ if (typeof window !== 'undefined') {
   window.__reelsCopy = {
     buildPhotoPlan, buildHookBeats, candidatesFromContext, pickPointLine, clauseSplit,
     toSpoken, endingClass, placeNames, stripNameSubject, placeFromSection, pickPlaceIntro, pickFollowLine,
+    isWeakCaption, isTriviaLine,
     fitLine13, lossLine, ctaLine, repairPlan, cutContextBlock, describeLines, LIMIT: LINE_LIMIT,
   };
 }
