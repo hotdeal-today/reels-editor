@@ -16,7 +16,7 @@ import { cardsFromImages, cardsFromTimeline, saveCarousel } from '../carousel.js
 import { reloadCarouselFromProject } from './export.js';
 import { makeClip } from '../media.js';
 import { DESIGN_SETS } from '../presets.js';
-import { DEFAULT_COPY, defaultCopy, topicKindOf, checkCaption, hookRulesText } from '../formula.js';
+import { defaultCopy, topicKindOf, checkCaption, hookRulesText } from '../formula.js';
 import { buildPhotoPlan, repairPlan, describeLines, isReelPhoto, cutContextBlock } from '../reelscopy.js';
 import {
   buildNarration, narrationReport, cleanNarrationTrack, syncNarrationToSegments,
