@@ -11,7 +11,7 @@ import {
   previewSpeech, stopSpeech, stopAllSpeech, playVoiceUrl, recordVoice, voiceAssetName,
 } from '../tts.js';
 import {
-  narrationRate, setNarrationRate, narrationReport, buildNarration,
+  narrationRate, setNarrationRate, narrationReport, buildNarration, narrationVoiceNow, fitCutsToVoice,
   syncNarrationToSegments, cleanNarrationTrack, voiceFor, voiceIsStale, segmentNarrationText,
 } from '../narration.js';
 import { planSummary } from '../voicelayout.js';
@@ -37,7 +37,7 @@ export function initAudioPanel(el) {
       <div class="card nar-card">
         <div class="sec-note" style="margin:0 0 7px">
           <b>자막과 1:1</b>로 움직입니다 — 2번에서 자막을 고치면 이 목록의 대본·시간도 바로 바뀝니다.
-          목소리는 <b>고른 한 가지</b>로 모든 구간을 만들고, 다시 만들면 옛 음성은 남기지 않습니다.
+          전체 대본을 <b>Gemini TTS로 1번에</b> 읽혀 자막 수만큼 나눠 담습니다 — 9컷이어도 목소리·톤이 하나로 같습니다.
         </div>
         <div class="row">
           <label>목소리</label>
@@ -53,7 +53,8 @@ export function initAudioPanel(el) {
         <div class="rate-chips" id="narRateChips">
           ${[0.9, 1, 1.1, 1.2, 1.3, 1.5].map((r) => `<button type="button" data-rate="${r}">${r.toFixed(1)}x</button>`).join('')}
         </div>
-        <div class="sec-note" style="margin:4px 0 8px">속도는 <b>미리듣기 · 타임라인 재생 · MP4 내보내기</b>에 똑같이 적용됩니다(길면 자동 압축은 이 속도에 곱해집니다).</div>
+        <div class="sec-note" style="margin:4px 0 8px">속도는 <b>전 구간에 똑같이</b> 적용됩니다 — 컷마다 배속이 달라져 목소리 톤이 변하지 않습니다.
+          음성이 컷보다 길면 그 컷 길이를 음성에 맞춰 늘립니다.</div>
         <button class="btn primary block" id="narGenAll" type="button">🗣 전체 자막 TTS 만들기</button>
         <button class="btn block" id="narSync" type="button" style="margin-top:6px">🔄 자막 기준으로 나레이션 다시 맞추기</button>
         <div class="ai-status hidden" id="narStatus"></div>
@@ -104,7 +105,7 @@ export function initAudioPanel(el) {
   bgmCard = $('#bgmCard', pane);
   sfxPicker = $('#sfxPicker', pane);
 
-  $('#narVoice', pane).value = state.project.audio.narrVoice || s.voice || 'Kore';
+  $('#narVoice', pane).value = narrationVoiceNow();
 
   $('#builtinSfx', pane).innerHTML = SFX_DEFS.map((d) => `
     <div class="sfx-item" data-key="${d.id}">
@@ -140,13 +141,14 @@ export function initAudioPanel(el) {
     const v = setNarrationRate($('#narRate', pane).value);
     paintRate(v);
   });
-  $('#narRate', pane).addEventListener('change', () => { renderNarration(); emit('timeline'); });
+  $('#narRate', pane).addEventListener('change', () => { refitAfterRate(); renderNarration(); emit('timeline'); });
   $('#narRateChips', pane).addEventListener('click', (e) => {
     const b = e.target.closest('[data-rate]');
     if (!b) return;
     const v = setNarrationRate(Number(b.dataset.rate));
     $('#narRate', pane).value = String(v);
     paintRate(v);
+    refitAfterRate();
     renderNarration();
     emit('timeline');
     emit('toast', { msg: `나레이션 속도를 ${v.toFixed(2)}x 로 바꿨습니다. 미리보기·MP4에 똑같이 적용됩니다.`, type: 'ok' });
@@ -179,6 +181,17 @@ function paintRate(v) {
   $$('#narRateChips [data-rate]', pane).forEach((b) => {
     b.classList.toggle('on', Math.abs(Number(b.dataset.rate) - Number(v)) < 0.001);
   });
+}
+
+/** 속도를 느리게 바꿔 음성이 길어졌으면 그만큼 컷을 늘립니다(배속은 그대로 — 피치 고정). */
+function refitAfterRate() {
+  const fit = fitCutsToVoice();
+  if (!fit.grew) return;
+  syncNarrationToSegments({ prune: false });
+  mixDirty();
+  persist();
+  emit('project', { panels: ['clips', 'text', 'audio'] });
+  emit('toast', { msg: `음성이 길어져 컷 ${fit.grew}개를 음성 길이에 맞춰 늘렸습니다(+${(fit.added || 0).toFixed(1)}초).`, type: 'ok' });
 }
 
 function narStatus(msg, type = '') {
@@ -225,17 +238,22 @@ async function runNarration(mode) {
       onProgress: (m) => narStatus(m, 'warn'),
     });
     if (res.upToDate) {
-      narStatus(`자막 ${narrationReport().captions}개 모두 이미 자막과 같은 나레이션입니다.`, 'ok');
+      narStatus(res.allManual
+        ? '모든 구간이 녹음·올린 파일이라 다시 만들 것이 없습니다.'
+        : `자막 ${narrationReport().captions}개 모두 이미 자막과 같은 나레이션입니다.`, 'ok');
     } else if (res.empty) {
       narStatus('읽을 자막이 없습니다.', 'err');
     } else {
       const sum = planSummary(voiceLayoutNow(), totalDuration());
-      const note = ` · 겹침 ${sum.overlaps}건${sum.sped ? ` · 자동 압축 ${sum.sped}개` : ''}`;
-      narStatus(`나레이션 ${res.ok}개 완료${res.cleared ? ` · 옛 음성 ${res.cleared}개 정리` : ''}${res.fail ? ` · 실패 ${res.fail}개 (${res.lastErr || ''})` : ''}${note}`, res.fail ? 'warn' : 'ok');
-      if (res.ok) {
+      const fitNote = res.fitted ? ` · 컷 ${res.fitted}개를 음성 길이에 맞춤(+${(res.added || 0).toFixed(1)}초)` : '';
+      if (res.split === false) {
+        narStatus(`자막 ${res.total}개를 정확히 나누지 못해 전체 나레이션 1트랙으로 넣었습니다(같은 목소리로 끝까지)${res.manualRemoved ? ` · 구간 음성 ${res.manualRemoved}개 정리` : ''}.`, 'warn');
+        emit('toast', { msg: `${res.voice} 목소리로 전체 대본을 한 번에 읽어 1트랙으로 넣었습니다.`, type: 'ok' });
+      } else {
+        narStatus(`나레이션 ${res.ok}개 완료 · TTS ${res.calls || 1}회 호출(한 목소리)${res.cleared ? ` · 옛 음성 ${res.cleared}개 정리` : ''}${fitNote} · 겹침 ${sum.overlaps}건 · 배속 편차 ${(sum.rateSpread || 0).toFixed(3)}`, 'ok');
         emit('toast', {
-          msg: `${res.voice} 목소리 하나로 ${res.ok}개 구간 나레이션을 만들었습니다${sum.sped ? ` (길면 ${sum.sped}개 자동 압축)` : ''}.`,
-          type: res.fail ? 'warn' : 'ok',
+          msg: `${res.voice} 목소리 하나로 자막 ${res.ok}개를 한 번에 읽어 만들었습니다${res.fitted ? ` (컷 ${res.fitted}개를 음성 길이에 맞춤)` : ''}.`,
+          type: 'ok',
         });
       }
       if (res.narrationOff) {
@@ -262,7 +280,7 @@ function renderNarration() {
   const s = loadAiSettings();
   const voiceSel = $('#narVoice', pane);
   if (voiceSel && document.activeElement !== voiceSel) {
-    voiceSel.value = state.project.audio.narrVoice || s.voice || 'Kore';
+    voiceSel.value = narrationVoiceNow();
   }
   const count = $('#narCount', pane);
   if (count) count.textContent = `자막 ${rep.captions}개 · 음성 ${rep.voices}개`;
@@ -322,16 +340,12 @@ function renderNarSegList(rep) {
     const l = vc ? lay.get(vc.id) : null;
     let badge = '';
     if (vc) {
-      const tag = [
-        l && l.spedUp ? `${l.rate.toFixed(2)}x` : '',
-        l && l.trimmed ? '끝 잘림' : '',
-      ].filter(Boolean).join(' · ');
       if (voiceIsStale(vc)) {
         badge = vc.genText == null
           ? `<span class="ai-badge-warn" title="이전 버전에서 만든 음성이라 자막과 같은지 확인되지 않았습니다">대본 확인 필요 — 다시 만들기</span>`
           : `<span class="ai-badge-warn" title="자막을 고쳐서 대본이 달라졌습니다">대본 바뀜 — 다시 만들기</span>`;
       } else {
-        badge = `<span class="ai-badge-ok" title="이 음성의 재생 속도 ${(l ? l.rate : rate).toFixed(2)}x">${escapeHtml(vc.voiceName || '음성')} ${l ? l.played.toFixed(1) : (vc.duration || 0).toFixed(1)}초${tag ? ` (${tag})` : ''}</span>`;
+        badge = `<span class="ai-badge-ok" title="전 구간 같은 배속 ${(l ? l.rate : rate).toFixed(2)}x">${escapeHtml(vc.voiceName || '음성')} ${l ? l.played.toFixed(1) : (vc.duration || 0).toFixed(1)}초</span>`;
       }
     }
     if (!text) badge += '<span class="ai-badge-warn">자막 없음</span>';
@@ -347,7 +361,7 @@ function renderNarSegList(rep) {
       </div>
       <div class="ai-seg-acts">
         <button class="btn tiny" data-segact="play" data-segid="${sg.id}" type="button" title="${vc ? '이 구간 음성 듣기' : '이 자막을 브라우저 음성으로 미리 읽어 보기(저장 안 됨)'}">🔊 듣기</button>
-        <button class="btn tiny ghost" data-segact="tts" data-segid="${sg.id}" type="button" title="이 구간만 Gemini TTS로 다시 만들기">✨ TTS</button>
+        <button class="btn tiny ghost" data-segact="tts" data-segid="${sg.id}" type="button" title="이 구간을 TTS로 — 톤이 섞이지 않게 전체 대본을 한 번에 읽어 만듭니다">✨ TTS</button>
         <button class="btn tiny ghost" data-segact="record" data-segid="${sg.id}" type="button" title="이 구간을 마이크로 녹음">🎙 녹음</button>
         <button class="btn tiny ghost" data-segact="file" data-segid="${sg.id}" type="button" title="외부 TTS 파일 넣기">📁 파일</button>
       </div>
@@ -441,7 +455,9 @@ async function onSegAction(e) {
     narStatus('이 구간 TTS를 만드는 중…', 'warn');
     try {
       const res = await buildNarration({ mode: 'one', segIds: [seg.id], voice, onProgress: (m) => narStatus(m, 'warn') });
-      narStatus(res.ok ? '이 구간 TTS를 만들었습니다.' : `만들지 못했습니다${res.lastErr ? `: ${res.lastErr}` : ''}`, res.ok ? 'ok' : 'err');
+      narStatus(res.ok
+        ? `전체 대본을 한 번에 읽어 ${res.ok}개 구간을 ${res.voice} 목소리 하나로 다시 만들었습니다.`
+        : `만들지 못했습니다${res.lastErr ? `: ${res.lastErr}` : ''}`, res.ok ? 'ok' : 'err');
       renderNarration();
       emit('project', { panels: ['audio'] });
     } catch (err) {

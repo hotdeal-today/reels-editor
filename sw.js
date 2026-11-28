@@ -1,7 +1,7 @@
 // sw.js — 릴스 스튜디오 서비스워커 (PWA 설치 + 오프라인 실행)
 //  · 같은 주소(GitHub Pages)의 파일만 다룹니다. Gemini·블로그 프록시·폰트 같은 외부 요청은 그대로 통과.
 //  · 네트워크를 먼저 확인하고(최신 버전 우선), 네트워크가 없을 때만 캐시를 씁니다.
-const VERSION = 'reels-studio-v11-2026-11-28';
+const VERSION = 'reels-studio-v12-2026-11-28';
 const CACHE = `${VERSION}`;
 const CORE = [
   './',

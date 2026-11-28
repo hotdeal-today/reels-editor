@@ -54,11 +54,19 @@ function rateFromMime(mime) {
   return m ? Number(m[1]) : 24000;
 }
 
-/** Gemini TTS 호출 → { blob, duration } */
+/**
+ * Gemini TTS 호출 → { blob, duration }
+ *  · 여러 자막을 '한 번에' 읽힐 때는 줄바꿈(\n\n)을 남겨 둡니다 — 문장 사이 쉼이 생겨
+ *    나중에 그 쉼 자리에서 자막 수만큼 정확히 자를 수 있습니다(voicesplit.js).
+ */
 export async function geminiTts(text, { apiKey, model, voice = 'Kore', style = '' } = {}) {
   if (!apiKey) throw new Error('Gemini API 키가 필요합니다. (무료 키: aistudio.google.com/apikey)');
   if (!model) throw new Error('TTS 모델을 찾지 못했습니다. 연결 확인을 먼저 눌러 주세요.');
-  const clean = String(text || '').replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  const clean = String(text || '')
+    .split(/\n+/)
+    .map((t) => t.replace(/\s{2,}/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n\n');
   if (!clean) throw new Error('읽을 자막이 없습니다.');
   if (clean.length > 900) throw new Error('한 번에 900자까지만 읽을 수 있습니다. 구간을 나눠 주세요.');
 
@@ -108,13 +116,18 @@ export async function geminiTts(text, { apiKey, model, voice = 'Kore', style = '
 
 export async function audioBlobDuration(blob) {
   try {
-    const buf = await blob.arrayBuffer();
-    const ctx = new OfflineAudioContext(1, 1, 48000);
-    const decoded = await ctx.decodeAudioData(buf);
-    return decoded.duration;
+    const decoded = await decodeAudioBlob(blob);
+    return decoded ? decoded.duration : 0;
   } catch (e) {
     return 0;
   }
+}
+
+/** Blob(WAV 등) → AudioBuffer. 자산으로 넣지 않고 바로 분석·분할할 때 씁니다. */
+export async function decodeAudioBlob(blob) {
+  const buf = await blob.arrayBuffer();
+  const ctx = new OfflineAudioContext(1, 1, 48000);
+  return ctx.decodeAudioData(buf.slice(0));
 }
 
 // ── 구간 음성(자막 읽기) 트랙 ────────────────────────────

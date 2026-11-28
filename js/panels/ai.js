@@ -19,7 +19,7 @@ import { DESIGN_SETS } from '../presets.js';
 import { defaultCopy, topicKindOf, checkCaption, hookRulesText } from '../formula.js';
 import { buildPhotoPlan, repairPlan, describeLines, isReelPhoto, cutContextBlock, isWeakCaption } from '../reelscopy.js';
 import {
-  buildNarration, narrationReport, cleanNarrationTrack, syncNarrationToSegments,
+  buildNarration, narrationReport, cleanNarrationTrack, syncNarrationToSegments, narrationVoiceNow,
 } from '../narration.js';
 import { buildProjectJson, loadProjectJson, projectFileName } from '../project-io.js';
 import { seek } from '../player.js';
@@ -226,7 +226,8 @@ export function initAiPanel(el) {
         <button class="btn primary block ai-big" id="aiGenerate" type="button">✨ AI로 제목·자막·효과음 세팅</button>
         <div class="sec-note" style="margin:6px 0 0">
           키는 이 브라우저(localStorage)에만 저장되고 서버로 보내지 않습니다. 사진·영상 프레임은 Gemini에 전송됩니다(무료 한도 내).
-          나레이션까지 켜 두면 자막과 <b>1:1 같은 글·같은 시간</b>으로 Gemini TTS를 만들어 영상에 섞습니다(구간당 2~5초 걸립니다).
+          나레이션까지 켜 두면 자막과 <b>1:1 같은 글·같은 시간</b>으로 Gemini TTS를 만들어 영상에 섞습니다.
+          전체 대본을 <b>한 번에</b> 읽혀 자막 수만큼 나누므로 9컷이어도 목소리 톤이 하나입니다.
           <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">무료 키 발급</a>
         </div>
         <div class="ai-status hidden" id="aiStatus"></div>
@@ -394,7 +395,7 @@ async function syncNarrationAfterLayout() {
   }
   busyState(true);
   try {
-    const r = await buildNarration({ mode: 'all', voice: s.voice, onProgress: (m) => status(m, 'warn') });
+    const r = await buildNarration({ mode: 'all', voice: narrationVoiceNow(), onProgress: (m) => status(m, 'warn') });
     if (r.ok || r.fail) {
       status(`나레이션 ${r.ok}개를 자막 그대로 1세트로 만들었습니다${r.fail ? ` · 실패 ${r.fail}개` : ''}`, r.fail ? 'warn' : 'ok');
       emit('toast', { msg: r.fail ? `나레이션 ${r.ok}개 완료 · ${r.fail}개 실패` : `나레이션 ${r.ok}개를 자막과 똑같이 만들었습니다.`, type: r.fail ? 'warn' : 'ok' });
@@ -691,7 +692,7 @@ async function resyncNarration() {
   busyState(true);
   status('자막 기준으로 나레이션을 다시 맞추는 중…', 'warn');
   try {
-    const r = await buildNarration({ mode: 'sync', voice: s.voice, onProgress: (m) => status(m, 'warn') });
+    const r = await buildNarration({ mode: 'sync', voice: narrationVoiceNow(), onProgress: (m) => status(m, 'warn') });
     status(r.upToDate ? '이미 자막과 같은 나레이션입니다.' : `나레이션 ${r.ok}개를 자막 기준으로 맞췄습니다${r.fail ? ` · 실패 ${r.fail}개` : ''}`, r.fail ? 'warn' : 'ok');
     renderNarrationSummary();
     emit('project', { panels: ['audio'] });

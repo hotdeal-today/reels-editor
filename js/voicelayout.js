@@ -1,21 +1,19 @@
-// voicelayout.js — 구간 음성(나레이션) 겹침 0 보장 배치 계산
+// voicelayout.js — 구간 음성(나레이션) 겹침 0 배치 · 전 구간 '단일 배속' 고정
 //
-// 왜 필요한가:
-//   자막 구간이 2.0초인데 Gemini TTS가 2.9초짜리 음성을 만들면, 그 음성을 2.0초에 그대로 두면
-//   앞 음성이 끝나기 전에 다음 음성이 시작돼 목소리가 2~3개 겹쳐 들립니다(중복 재생처럼 들림).
+// 왜 이렇게 바꿨나 (v12 · 2026-11-28):
+//   예전에는 컷 길이에 맞추려고 컷마다 배속(playbackRate)을 1.0~1.35배로 제멋대로 바꿨습니다.
+//   배속이 다르면 피치(음높이)도 같이 올라가고 내려가서, 2~3초마다 다른 사람 목소리처럼 들렸습니다.
+//   이제 배속은 사용자가 고른 값(baseRate, 기본 1.0) 하나로 전 구간 100% 동일합니다.
+//   길이가 모자라면 배속을 올리지 않고, 앞 음성이 끝난 뒤(prevEnd + gap)에 순서대로 놓습니다.
+//   컷 길이는 나레이션을 만들 때 음성 길이에 맞춰 늘립니다(narration.js fitCutsToVoice) —
+//   그래서 자막이 떠 있는 동안 그 자막의 음성이 들립니다.
 //
-// 여기서는 음성마다 '시작 시각 + 배속 + 읽을 구간'을 계산합니다.
-//   ① 앞 음성이 끝난 뒤에만 시작합니다(겹침 0, 최소 여백 LAYOUT_GAP).
-//   ② 다음 자막이 뜨기 전에 끝나도록 필요한 만큼만 배속합니다(최대 LAYOUT_MAX_RATE = 1.35배).
-//   ③ 그래도 넘치면 다음 자막이 뜬 뒤 0.3초까지는 더 들려주고(문장이 잘리지 않게), 그 뒤에도 남는 만큼만
-//      짧게 끊습니다(클릭 방지 페이드아웃은 오디오 믹스에서). 시작을 미룬 음성은 pushed 로 표시됩니다.
-//
-// 이 계산은 미리듣기(audio.js buildMix)와 MP4 내보내기(export.js → 같은 buildMix)가 함께 쓰므로
-// 두 곳의 결과가 항상 같습니다. 저장된 프로젝트 값(start·duration)은 건드리지 않습니다(계산만).
+// 이 계산은 미리듣기(audio.js buildMix)·타임라인(timeline.js)·MP4 내보내기(export.js)가 함께 쓰므로
+// 어디서 봐도 결과가 같습니다. 저장된 프로젝트 값(start·duration)은 건드리지 않습니다(계산만).
 
 export const LAYOUT_GAP = 0.04;       // 앞 음성 끝 ~ 다음 음성 시작 최소 여백(초)
-export const LAYOUT_MAX_RATE = 1.35;  // 자동 배속 상한 (1.35배 ≈ 반음 4.5개 — 목소리가 그대로 들리는 선)
-export const LAYOUT_ALLOW = 0.3;      // 다음 자막이 떠도 이만큼은 더 말하게 해 줍니다(문장이 잘리지 않게)
+export const LAYOUT_MAX_RATE = 1;     // (예전 값 · 호환용) 이제 컷별 배속 상한은 쓰지 않습니다 — 항상 baseRate
+export const LAYOUT_ALLOW = 0;        // (예전 값 · 호환용) 자막을 넘겨 말하게 하는 여유 — 이제 쓰지 않습니다
 export const LAYOUT_MIN_SLOT = 0.12;  // 이보다 짧은 틈은 '자리가 없는 것'으로 봅니다
 
 const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
@@ -33,12 +31,13 @@ export function voiceContent(v) {
 
 /**
  * 음성 목록 전체의 겹침 0 배치를 계산합니다.
+ *  · 모든 클립의 rate = baseRate (컷마다 배속이 달라지지 않습니다 → 목소리 톤 고정)
  * @param {Array} items  p.audio.voice (id·start·duration·lead·tail)
- * @param {{duration?:number, gap?:number, maxRate?:number, baseRate?:number}} opts
+ * @param {{duration?:number, gap?:number, baseRate?:number}} opts
  *   duration = 영상 전체 길이, baseRate = 사용자가 고른 나레이션 속도(배속)
  * @returns {Map<string, {id,start,rate,end,played,content,offset,pushed,spedUp,trimmed}>}
  */
-export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate = LAYOUT_MAX_RATE, baseRate = 1 } = {}) {
+export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, baseRate = 1 } = {}) {
   const list = (Array.isArray(items) ? items : [])
     .filter((v) => v && v.id)
     .map((v, i) => ({ v, i, at: Math.max(0, Number(v.start) || 0) }))
@@ -46,9 +45,8 @@ export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate
 
   const total = Math.max(0, Number(duration) || 0);
   const gapS = Math.max(0, Number(gap) || 0);
-  // 기본 속도(사용자가 고른 배속) — 이보다 느리게는 하지 않고, 넘칠 때만 이 값 기준으로 더 당깁니다.
+  // 전 구간 공통 배속 — 사용자가 고른 값 하나만 씁니다.
   const base = Math.max(0.5, Math.min(2, Number(baseRate) || 1));
-  const cap = Math.max(base, base * Math.max(1, Number(maxRate) || 1));
   const plan = new Map();
   let prevEnd = -Infinity;
 
@@ -56,55 +54,29 @@ export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate
     const { v, at } = list[k];
     const { lead, speak } = voiceContent(v);
 
-    // ① 앞 음성과 절대 겹치지 않게
+    // ① 앞 음성이 끝난 뒤에만 시작합니다(겹침 0). 배속으로 당기지 않습니다.
     let start = at;
     if (Number.isFinite(prevEnd) && start < prevEnd + gapS) start = prevEnd + gapS;
 
-    // ② 끝나야 할 시각 = 다음 음성의 자막 시작(마지막 음성은 영상 끝)
-    const nextAt = k + 1 < list.length ? list[k + 1].at : null;
-    let deadline = nextAt != null ? nextAt : total;
-    if (!(deadline > start + LAYOUT_MIN_SLOT)) deadline = 0; // 이미 늦었으면 자연 길이대로 두고 다음 음성을 미룹니다
+    // ② 길이는 배속 하나로만 정해집니다. 끝이 다음 자막보다 조금 늦어도 자르지 않습니다(문장 보존).
+    const played = speak / base;
 
-    let rate = base;
-    if (deadline) {
-      const avail = deadline - start;
-      if (speak / base > avail) rate = Math.min(cap, Math.max(base, speak / avail));
-    }
-    rate = Math.max(base, Math.ceil(rate * 1000) / 1000); // 올림 — 반올림 때문에 1ms씩 잘리는 일 방지
-
-    let played = speak / rate;          // 실제로 들리는 길이(초)
-    let trimmed = false;
-    // 끝낼 수 있는 마지막 시각: 다음 자막 시각 + 0.3초(문장 끝까지 들려주려고 조금 넘겨 줍니다) / 영상 끝
-    const totalCap = total > 0 ? total : Infinity;
-    let hardEnd = totalCap;
-    if (nextAt != null) hardEnd = Math.min(hardEnd, nextAt + LAYOUT_ALLOW);
-    hardEnd = Math.max(hardEnd, Math.min(start + LAYOUT_MIN_SLOT, totalCap)); // 이미 늦었어도 최소한 이만큼은
-    if (start + played > hardEnd) {
-      played = hardEnd - start;
-      trimmed = true;
-    }
-    if (!(played > 0.05)) { plan.set(v.id, emptyPlan(v.id, start, rate)); continue; }
-
-    const content = Math.min(speak, trimmed ? played * rate : speak); // 버퍼에서 읽을 초
     plan.set(v.id, {
       id: v.id,
       start: r3(start),
-      rate,
+      rate: base,
       end: r3(start + played),
       played: r3(played),
-      content: r3(content),
+      content: r3(speak),
       offset: r3(lead),
-      pushed: start > at + 0.1,
-      spedUp: rate > base + 0.0005,
-      trimmed,
+      pushed: start > at + 0.001,
+      spedUp: false,
+      trimmed: false,
     });
     prevEnd = start + played;
+    if (total > 0 && start >= total) prevEnd = total; // 영상 밖은 더 밀지 않습니다
   }
   return plan;
-}
-
-function emptyPlan(id, start, rate) {
-  return { id, start: r3(start), rate, end: r3(start), played: 0, content: 0, offset: 0, pushed: false, spedUp: false, trimmed: false };
 }
 
 /** 배치를 사람이 읽는 문장으로 — 화면 안내·로그용 */
@@ -112,8 +84,6 @@ export function describePlan(plan) {
   if (!plan) return '';
   const bits = [];
   if (plan.pushed) bits.push('시작 미룸');
-  if (plan.spedUp) bits.push(`${plan.rate.toFixed(2)}배속`);
-  if (plan.trimmed) bits.push('끝 잘림');
   return bits.join(' · ');
 }
 
@@ -129,6 +99,13 @@ export function findOverlaps(plan) {
   return out;
 }
 
+/** 배속 편차 — 0.000 이어야 '전 구간 같은 목소리 톤'입니다(검증용) */
+export function planRateSpread(plan) {
+  const rates = Array.from(plan.values()).map((p) => Number(p.rate) || 0);
+  if (!rates.length) return 0;
+  return r3(Math.max(...rates) - Math.min(...rates));
+}
+
 /** 배치 요약 — 화면에 "겹침 0" 확인용 */
 export function planSummary(plan, duration = 0) {
   const rows = Array.from(plan.values());
@@ -142,6 +119,7 @@ export function planSummary(plan, duration = 0) {
     overlapList: overlaps,
     sped,
     trimmed,
+    rateSpread: planRateSpread(plan),
     lastEnd: r3(lastEnd),
     overDuration: duration > 0 ? r3(Math.max(0, lastEnd - duration)) : 0,
   };
