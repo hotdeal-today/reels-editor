@@ -12,7 +12,7 @@ import { initTimeline, renderTimeline, setPlayhead } from './timeline.js';
 import { initPlayer, togglePlay, play, pause, seek, requestRender, resizeCanvas, setMuted } from './player.js';
 import { hitTestText, mosaicHitInfo, mosaicRect, setMosaicDragging } from './render.js';
 import { buildMix } from './audio.js';
-import { cleanNarrationTrack, syncNarrationToSegments, narrationReport, buildNarration } from './narration.js';
+import { cleanNarrationTrack, syncNarrationToSegments, narrationReport, buildNarration, adoptNarrationVoice } from './narration.js';
 
 let activeTab = 'clips';
 
@@ -25,6 +25,7 @@ async function boot() {
   try {
     const cleaned = cleanNarrationTrack({ forget: false });
     syncNarrationToSegments({ prune: false });
+    adoptNarrationVoice();
     if (cleaned) console.info(`[나레이션] 자막과 맞지 않던 옛 음성 ${cleaned}개를 정리했습니다.`);
   } catch (e) { console.warn(e); }
   try { await loadCustomFontsFromDB(); } catch (e) { console.warn(e); }

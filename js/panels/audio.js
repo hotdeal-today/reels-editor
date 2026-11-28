@@ -278,6 +278,9 @@ function renderNarration() {
     bits.push(`<div>자막과 어긋난 TTS 음성 <b>${rep.staleTts.length}개</b>가 남아 있습니다(옛 대본으로 읽은 목소리).
       <button class="btn tiny danger" data-naract="sync" type="button">지금 다시 맞추기</button></div>`);
   }
+  if (rep.missing.length) {
+    bits.push(`<div>나레이션이 없는 구간 <b>${rep.missing.length}개</b> — 위 <b>전체 자막 TTS 만들기</b>로 자막 그대로 채울 수 있습니다.</div>`);
+  }
   if (rep.staleManual.length) {
     bits.push(`<div>녹음·올린 파일 <b>${rep.staleManual.length}개</b>는 자막이 바뀌었습니다. 🔊로 확인하거나 ✨TTS로 바꿔 주세요.</div>`);
   }
@@ -530,6 +533,7 @@ function handleNarAction(act) {
       persist();
       renderFullNarration();
       renderNarration();
+      emit('timeline');
       emit('toast', { msg: '전체 나레이션 파일을 껐습니다(자막별 나레이션만 들립니다).', type: 'ok' });
     }
   }

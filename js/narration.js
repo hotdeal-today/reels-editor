@@ -110,6 +110,24 @@ export function syncNarrationToSegments({ prune = true, forget = false } = {}) {
   return { changed, removed };
 }
 
+/**
+ * 프로젝트의 음성이 한 목소리로만 이루어져 있으면 그 목소리를 '이 프로젝트의 목소리'로 삼습니다.
+ * (2번·3번 화면의 목소리 선택과 실제 음성이 어긋나 보이지 않게)
+ */
+export function adoptNarrationVoice() {
+  const p = state.project;
+  if (!p || !p.audio) return null;
+  const names = Array.from(new Set((p.audio.voice || []).map((v) => v && v.voiceName).filter(Boolean)));
+  if (names.length !== 1) return null;
+  const voice = names[0];
+  if (p.audio.narrVoice !== voice) {
+    p.audio.narrVoice = voice;
+    saveAiSettings({ voice });
+    persist();
+  }
+  return voice;
+}
+
 /** 화면·요약용 상태 */
 export function narrationReport() {
   const p = state.project;
