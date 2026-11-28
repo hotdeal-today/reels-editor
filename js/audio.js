@@ -219,9 +219,23 @@ export async function previewSfx(id, volume = 1) {
   previewSrc = src;
 }
 
+// 타임라인 재생·음성 미리듣기가 시작되면 효과음 미리듣기도 멈춥니다(소리 겹침 방지).
+if (typeof window !== 'undefined') {
+  window.addEventListener('reels:audition-stop', () => {
+    try { previewSrc?.stop(); } catch (e) { /* 무시 */ }
+    previewSrc = null;
+  });
+}
+
 function clampRate(r) {
   const n = Number(r) || 1;
-  return Math.max(0.5, Math.min(2, n));
+  return Math.max(0.5, Math.min(4, n));
+}
+
+/** 이 프로젝트의 나레이션 기본 배속(사용자가 고른 값) */
+function narrationBaseRate() {
+  const n = Number(state.project && state.project.audio && state.project.audio.narrRate);
+  return Number.isFinite(n) && n > 0 ? Math.max(0.5, Math.min(2, n)) : 1;
 }
 
 // ── 믹스다운 ────────────────────────────────────────────
@@ -264,8 +278,8 @@ export async function buildMix(duration) {
     src.start(start, trimIn, segLen);
   }
 
-  // 2) 나레이션
-  if (p.audio.narration && p.audio.narration.assetId) {
+  // 2) 나레이션 (전체 길이 파일 — 자막별 나레이션을 쓰면 자동으로 꺼 둡니다: on:false)
+  if (p.audio.narration && p.audio.narration.assetId && p.audio.narration.on !== false) {
     const n = p.audio.narration;
     const buf = await decodeAudio(n.assetId);
     if (buf) {
@@ -273,6 +287,7 @@ export async function buildMix(duration) {
       if (start < dur) {
         const src = oc.createBufferSource();
         src.buffer = buf;
+        src.playbackRate.value = clampRate(narrationBaseRate());
         const g = oc.createGain();
         const vol = Math.max(0, (n.volume ?? 100) / 100);
         g.gain.value = vol;
@@ -336,7 +351,7 @@ export async function buildMix(duration) {
       item.tail = q.tail;
     }
   }
-  const voicePlan = planVoiceLayout(voices, { duration: dur });
+  const voicePlan = planVoiceLayout(voices, { duration: dur, baseRate: narrationBaseRate() });
   for (const item of voices) {
     const lay = voicePlan.get(item.id) || null;
     const start = Math.max(0, lay ? lay.start : (item.start || 0));

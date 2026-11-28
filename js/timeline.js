@@ -3,6 +3,7 @@ import { $, clamp, emit, fmtSec } from './util.js';
 import { state, clipDur, clipStart, totalDuration, getAsset } from './state.js';
 import { sfxDuration, sfxName } from './audio.js';
 import { planVoiceLayout } from './voicelayout.js';
+import { voiceIsStale } from './narration.js';
 import { seek } from './player.js';
 
 const TRACKS = ['clips', 'title', 'badge', 'subtitle', 'narration', 'bgm', 'sfx'];
@@ -124,8 +125,8 @@ export function renderTimeline() {
   const nar = p && p.audio.narration;
   const voices = (p && p.audio.voice) || [];
   // 겹침 0 보정된 실제 위치·길이 — 미리듣기·내보내기와 같은 계산
-  const voiceLay = p ? planVoiceLayout(voices, { duration: totalDuration() }) : null;
-  nTrack.innerHTML = (nar
+  const voiceLay = p ? planVoiceLayout(voices, { duration: totalDuration(), baseRate: Number(p.audio.narrRate) || 1 }) : null;
+  nTrack.innerHTML = (nar && nar.on !== false
     ? `<div class="tl-block audio" data-audio="narration" style="left:${(nar.start || 0) * pps}px;width:${Math.max(6, (nar.duration || 2) * pps)}px"><span class="lbl">${escapeName(nar.name || '나레이션')}</span></div>`
     : '') + voices.map((v) => {
     const l = voiceLay && voiceLay.get(v.id);
@@ -133,7 +134,11 @@ export function renderTimeline() {
     const len = l ? l.played : (v.duration || 1);
     const left = at * pps;
     const w = Math.max(10, len * pps);
-    return `<div class="tl-block voice" data-voice="${v.id}" style="left:${left}px;width:${w}px"><span class="lbl">${escapeName(v.name || '음성')}${l && l.spedUp ? ' ⚡' : ''}</span></div>`;
+    // 라벨은 '지금 자막 글자'를 그대로 보여 줍니다 — 옛 대본과 따로 놀지 않게.
+    const seg = v.segId ? (p.segments || []).find((s) => s.id === v.segId) : null;
+    const live = seg ? String(seg.subtitle || seg.title || seg.badge || '').trim() : '';
+    const stale = voiceIsStale(v);
+    return `<div class="tl-block voice${stale ? ' stale' : ''}" data-voice="${v.id}" title="${escapeName(live || v.name || '음성')}" style="left:${left}px;width:${w}px"><span class="lbl">${escapeName(live || v.name || '음성')}${stale ? ' ✎' : ''}${l && l.spedUp ? ' ⚡' : ''}</span></div>`;
   }).join('');
 
   // BGM

@@ -58,7 +58,7 @@ function rateFromMime(mime) {
 export async function geminiTts(text, { apiKey, model, voice = 'Kore', style = '' } = {}) {
   if (!apiKey) throw new Error('Gemini API 키가 필요합니다. (무료 키: aistudio.google.com/apikey)');
   if (!model) throw new Error('TTS 모델을 찾지 못했습니다. 연결 확인을 먼저 눌러 주세요.');
-  const clean = String(text || '').trim();
+  const clean = String(text || '').replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
   if (!clean) throw new Error('읽을 자막이 없습니다.');
   if (clean.length > 900) throw new Error('한 번에 900자까지만 읽을 수 있습니다. 구간을 나눠 주세요.');
 
@@ -125,7 +125,7 @@ export function voiceClips() {
   return p.audio.voice;
 }
 
-export async function addVoiceClip({ blob, name, start, volume = 100, segId = null, kind = 'tts', voiceName = '' }) {
+export async function addVoiceClip({ blob, name, start, volume = 100, segId = null, kind = 'tts', voiceName = '', text = '' }) {
   const p = state.project;
   const ext = (blob.type || '').includes('wav') ? 'wav' : ((blob.type || '').includes('mp4') ? 'm4a' : 'webm');
   const base = String(name || '음성').replace(/\.(wav|mp3|m4a|aac|webm|ogg)$/i, '').trim() || '음성';
@@ -146,6 +146,8 @@ export async function addVoiceClip({ blob, name, start, volume = 100, segId = nu
     segId,
     kind,
     voiceName: voiceName || '',
+    text: String(text || ''),        // 지금 자막 기준 대본 (자막을 고치면 같이 바뀝니다)
+    genText: String(text || ''),     // 이 음성을 만들 때 읽힌 대본 — 다르면 stale
     createdAt: Date.now(),
   };
   p.audio.voice.push(item);
@@ -168,7 +170,8 @@ export function removeVoiceClip(id, { forget = false } = {}) {
 
 /** 지금 프로젝트의 음성 배치(겹침 0 보정 결과) — 화면·검증용 */
 export function voiceLayoutNow() {
-  return planVoiceLayout(voiceClips(), { duration: totalDuration() });
+  const baseRate = Number(state.project && state.project.audio && state.project.audio.narrRate) || 1;
+  return planVoiceLayout(voiceClips(), { duration: totalDuration(), baseRate });
 }
 
 /** 화면에 쓸 한 줄: "2.9초 → 2.15초 (1.35배속)" */
@@ -224,6 +227,36 @@ export function voiceClipFor(segId) {
   return voiceClips().find((v) => v.segId === segId) || null;
 }
 
+// ── 재생 중인 소리 전부 멈추기 (목소리 겹침 원천 차단) ──
+//  · 브라우저 음성(speechSynthesis), 구간 음성 '듣기' 오디오, 효과음 미리듣기를 한 번에 멈춥니다.
+//  · 미리보기 재생(player)과 미리듣기 버튼이 서로 겹쳐 두 목소리가 나오지 않게 항상 먼저 부릅니다.
+let auditionEl = null;
+
+export function stopAllSpeech() {
+  try { if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) { /* 무시 */ }
+  if (auditionEl) {
+    try { auditionEl.pause(); auditionEl.currentTime = 0; } catch (e) { /* 무시 */ }
+    auditionEl = null;
+  }
+  try { window.dispatchEvent(new CustomEvent('reels:audition-stop')); } catch (e) { /* 무시 */ }
+}
+
+/** 구간 음성 하나를 실제 오디오로 재생 (배속 반영) */
+export function playVoiceUrl(url, { volume = 1, rate = 1, onEnd = null } = {}) {
+  stopAllSpeech();
+  const audio = new Audio(url);
+  auditionEl = audio;
+  try { audio.volume = clamp(volume, 0, 1); } catch (e) { /* 무시 */ }
+  try { audio.playbackRate = clamp(rate || 1, 0.5, 4); } catch (e) { /* 무시 */ }
+  audio.addEventListener('ended', () => {
+    if (auditionEl === audio) auditionEl = null;
+    if (onEnd) { try { onEnd(); } catch (e) { /* 무시 */ } }
+  }, { once: true });
+  const p = audio.play();
+  if (p && p.catch) p.catch(() => { if (auditionEl === audio) auditionEl = null; });
+  return audio;
+}
+
 // ── 브라우저 음성 (미리듣기 전용) ───────────────────────
 export function speechSupported() {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -236,9 +269,9 @@ export function localVoices() {
 
 export async function previewSpeech(text, { voiceURI = '', rate = 1, pitch = 1 } = {}) {
   if (!speechSupported()) throw new Error('이 브라우저는 음성 읽기를 지원하지 않습니다.');
-  const clean = String(text || '').trim();
+  const clean = String(text || '').replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
   if (!clean) throw new Error('읽을 자막이 없습니다.');
-  window.speechSynthesis.cancel();
+  stopAllSpeech();   // 다른 목소리·오디오가 켜져 있으면 먼저 끕니다(두 목소리 동시 재생 방지)
   const utter = new SpeechSynthesisUtterance(clean);
   utter.lang = 'ko-KR';
   utter.rate = clamp(rate, 0.5, 2);

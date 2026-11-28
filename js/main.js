@@ -1,6 +1,6 @@
 // main.js — 앱 부팅 · 탭 · 전역 이벤트
 import { $, $$, clamp, on, emit, fmtSec } from './util.js';
-import { state, loadProject, loadAssets, persist, newProject, totalDuration, activeSegment, getAsset, mixDirty } from './state.js';
+import { state, loadProject, loadAssets, persist, newProject, totalDuration, activeSegment, getAsset, mixDirty, applyTextPos, posLinked } from './state.js';
 import { openDB, idbClear } from './db.js';
 import { warmupBuiltinFonts, loadCustomFontsFromDB, ensureFont } from './fonts.js';
 import { initClipsPanel, addMediaFiles, refreshClips, setSelectedClip, syncMosaicControls } from './panels/clips.js';
@@ -12,6 +12,7 @@ import { initTimeline, renderTimeline, setPlayhead } from './timeline.js';
 import { initPlayer, togglePlay, play, pause, seek, requestRender, resizeCanvas, setMuted } from './player.js';
 import { hitTestText, mosaicHitInfo, mosaicRect, setMosaicDragging } from './render.js';
 import { buildMix } from './audio.js';
+import { cleanNarrationTrack, syncNarrationToSegments, narrationReport, buildNarration } from './narration.js';
 
 let activeTab = 'clips';
 
@@ -20,6 +21,12 @@ async function boot() {
   try { await openDB(); } catch (e) { console.warn(e); }
   await loadProject();
   await loadAssets();
+  // 옛 저장본에 남은 겹친·옛 구간 나레이션을 정리하고, 대본·시작 시각을 지금 자막에 맞춥니다.
+  try {
+    const cleaned = cleanNarrationTrack({ forget: false });
+    syncNarrationToSegments({ prune: false });
+    if (cleaned) console.info(`[나레이션] 자막과 맞지 않던 옛 음성 ${cleaned}개를 정리했습니다.`);
+  } catch (e) { console.warn(e); }
   try { await loadCustomFontsFromDB(); } catch (e) { console.warn(e); }
 
   initClipsPanel($('[data-pane="clips"]'));
@@ -47,7 +54,10 @@ async function boot() {
   $('#emptyPick').addEventListener('click', () => $('#globalFilePicker').click());
 
   // 디버깅용 (읽기 전용 참고): 콘솔에서 현재 상태 확인
-  window.__reels = { state, totalDuration, render: () => requestRender(), seek, mix: () => buildMix(totalDuration()) };
+  window.__reels = {
+    state, totalDuration, render: () => requestRender(), seek, mix: () => buildMix(totalDuration()),
+    narration: { report: narrationReport, sync: syncNarrationToSegments, clean: cleanNarrationTrack, build: buildNarration },
+  };
 
   refreshAll();
   // 웹폰트 CSS → 실제 글꼴을 받은 뒤 한 번 더 그려 폴백 글꼴로 굳는 것을 방지
@@ -307,16 +317,10 @@ function bindCanvasDrag() {
     const pt = toDesign(ev);
     if (drag) {
       if (Math.abs(pt.x - drag.startX) > 2 || Math.abs(pt.y - drag.startY) > 2) drag.moved = true;
-      const st = state.project.texts[drag.key];
       const nx = clamp(pt.x - drag.dx, 0, 1080);
       const ny = clamp(pt.y - drag.dy, 0, 1920);
-      const seg = state.project.segments.find((s) => s.id === drag.segId);
-      if (seg) {
-        seg.pos = seg.pos || {};
-        seg.pos[drag.key] = { x: nx, y: ny };
-      } else {
-        st.x = nx; st.y = ny;
-      }
+      // posLink(기본 ON)이면 모든 구간 자막이 같이 움직입니다 — 컷마다 위치가 달라지지 않게.
+      applyTextPos(drag.key, nx, ny, drag.segId);
       requestRender();
       return;
     }
@@ -342,7 +346,7 @@ function bindCanvasDrag() {
       if (moved) {
         persist();
         if (activeTab === 'text') { syncPositionInputs(); }
-        emit('toast', { msg: '글자 위치를 옮겼습니다.' });
+        emit('toast', { msg: posLinked() ? '글자 위치를 옮겼습니다 — 모든 구간 자막도 같이 정렬됩니다.' : '글자 위치를 옮겼습니다.' });
       }
       return;
     }

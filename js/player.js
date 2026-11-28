@@ -4,6 +4,7 @@ import { state, totalDuration, locate, clipDur } from './state.js';
 import { renderFrame } from './render.js';
 import { buildMix, audioCtx } from './audio.js';
 import { videoFor, seekVideo, waitVideoReady, allVideoEls } from './media.js';
+import { stopAllSpeech } from './tts.js';
 
 const canvas = $('#preview');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -105,9 +106,8 @@ export async function play() {
 
 async function startPlayback(dur) {
   if (state.time >= dur - 0.02) state.time = 0;
-  // 브라우저 음성(speechSynthesis)·구간 음성 '듣기'가 켜져 있으면 같이 들려 중복되므로 먼저 멈춥니다.
-  try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) { /* 무시 */ }
-  try { window.dispatchEvent(new CustomEvent('reels:audition-stop')); } catch (e) { /* 무시 */ }
+  // 재생 전에 브라우저 음성·구간 음성 '듣기'·효과음 미리듣기를 모두 멈춥니다(두 목소리 겹침 방지).
+  stopAllSpeech();
   const mix = await ensureMix();
   const ac = audioCtx();
   stopSource();

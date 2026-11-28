@@ -84,7 +84,9 @@ export function defaultProject() {
     segments: [
       { id: uid('seg'), start: 0, end: 4, title: '', badge: '', subtitle: '', pos: {} },
     ],
-    audio: { narration: null, bgm: null, sfx: [], customSfx: [], voice: [] },
+    audio: { narration: null, bgm: null, sfx: [], customSfx: [], voice: [], narrRate: 1, narrVoice: '' },
+    // 전체 자막 위치 같이 움직이기 (기본 ON) — 자막 하나를 옮기면 모든 구간이 같은 X/Y 로 정렬됩니다.
+    posLink: true,
     export: { width: 1080, height: 1920, fps: 30, realtime: false, bitrateMbps: 8, carouselRatio: '4:5', carouselCount: 5 },
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -217,6 +219,56 @@ export function textPos(key, t) {
   const p = seg && seg.pos && seg.pos[key];
   if (p) return { x: p.x, y: p.y, seg };
   return { x: st.x, y: st.y, seg };
+}
+
+// ── 자막 위치 (전체 같이 / 구간만) ────────────────────
+export function posLinked() {
+  return !state.project || state.project.posLink !== false;
+}
+
+export function setPosLink(on) {
+  if (!state.project) return;
+  state.project.posLink = !!on;
+}
+
+/** 지금 위치를 모든 구간에 똑같이 적용합니다(일렬 정렬). */
+export function applyPosAllSegments(key, x, y) {
+  const p = state.project;
+  if (!p || !p.texts[key]) return { x, y };
+  const nx = clamp(Number(x) || 0, 0, 1080);
+  const ny = clamp(Number(y) || 0, 0, 1920);
+  for (const s of p.segments || []) {
+    s.pos = s.pos || {};
+    s.pos[key] = { x: nx, y: ny };
+  }
+  p.texts[key].x = nx;
+  p.texts[key].y = ny;
+  return { x: nx, y: ny };
+}
+
+/**
+ * 글자 위치를 옮길 때의 단일 통로.
+ *  · posLink 가 켜져 있으면(기본) 모든 구간이 같은 위치로 함께 움직입니다.
+ *  · 꺼져 있으면 지금 구간만 움직입니다.
+ */
+export function applyTextPos(key, x, y, segId = null) {
+  const p = state.project;
+  if (!p || !p.texts[key]) return { x, y };
+  if (posLinked()) return applyPosAllSegments(key, x, y);
+  const nx = clamp(Number(x) || 0, 0, 1080);
+  const ny = clamp(Number(y) || 0, 0, 1920);
+  const seg = (segId && (p.segments || []).find((s) => s.id === segId))
+    || activeSegment(state.time)
+    || (p.segments || []).find((s) => s.id === state.sel.segment)
+    || null;
+  if (seg) {
+    seg.pos = seg.pos || {};
+    seg.pos[key] = { x: nx, y: ny };
+  } else {
+    p.texts[key].x = nx;
+    p.texts[key].y = ny;
+  }
+  return { x: nx, y: ny };
 }
 
 // ── 저장 ─────────────────────────────────────────────

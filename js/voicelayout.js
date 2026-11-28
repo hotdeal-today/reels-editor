@@ -34,10 +34,11 @@ export function voiceContent(v) {
 /**
  * 음성 목록 전체의 겹침 0 배치를 계산합니다.
  * @param {Array} items  p.audio.voice (id·start·duration·lead·tail)
- * @param {{duration?:number, gap?:number, maxRate?:number}} opts  duration = 영상 전체 길이
+ * @param {{duration?:number, gap?:number, maxRate?:number, baseRate?:number}} opts
+ *   duration = 영상 전체 길이, baseRate = 사용자가 고른 나레이션 속도(배속)
  * @returns {Map<string, {id,start,rate,end,played,content,offset,pushed,spedUp,trimmed}>}
  */
-export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate = LAYOUT_MAX_RATE } = {}) {
+export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate = LAYOUT_MAX_RATE, baseRate = 1 } = {}) {
   const list = (Array.isArray(items) ? items : [])
     .filter((v) => v && v.id)
     .map((v, i) => ({ v, i, at: Math.max(0, Number(v.start) || 0) }))
@@ -45,7 +46,9 @@ export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate
 
   const total = Math.max(0, Number(duration) || 0);
   const gapS = Math.max(0, Number(gap) || 0);
-  const cap = Math.max(1, Number(maxRate) || 1);
+  // 기본 속도(사용자가 고른 배속) — 이보다 느리게는 하지 않고, 넘칠 때만 이 값 기준으로 더 당깁니다.
+  const base = Math.max(0.5, Math.min(2, Number(baseRate) || 1));
+  const cap = Math.max(base, base * Math.max(1, Number(maxRate) || 1));
   const plan = new Map();
   let prevEnd = -Infinity;
 
@@ -62,12 +65,12 @@ export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate
     let deadline = nextAt != null ? nextAt : total;
     if (!(deadline > start + LAYOUT_MIN_SLOT)) deadline = 0; // 이미 늦었으면 자연 길이대로 두고 다음 음성을 미룹니다
 
-    let rate = 1;
+    let rate = base;
     if (deadline) {
       const avail = deadline - start;
-      if (speak > avail) rate = Math.min(cap, Math.max(1, speak / avail));
+      if (speak / base > avail) rate = Math.min(cap, Math.max(base, speak / avail));
     }
-    rate = Math.max(1, Math.ceil(rate * 1000) / 1000); // 올림 — 반올림 때문에 1ms씩 잘리는 일 방지
+    rate = Math.max(base, Math.ceil(rate * 1000) / 1000); // 올림 — 반올림 때문에 1ms씩 잘리는 일 방지
 
     let played = speak / rate;          // 실제로 들리는 길이(초)
     let trimmed = false;
@@ -92,7 +95,7 @@ export function planVoiceLayout(items, { duration = 0, gap = LAYOUT_GAP, maxRate
       content: r3(content),
       offset: r3(lead),
       pushed: start > at + 0.1,
-      spedUp: rate > 1.0005,
+      spedUp: rate > base + 0.0005,
       trimmed,
     });
     prevEnd = start + played;

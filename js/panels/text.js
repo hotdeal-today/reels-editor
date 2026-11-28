@@ -1,6 +1,7 @@
 // panels/text.js — 탭2: 제목 · 배지 · 자막
 import { $, $$, clamp, emit, uid, escapeHtml, isFontFile } from '../util.js';
-import { state, TEXT_KEYS, TEXT_LABEL, defaultStyle, totalDuration, activeSegment, persist, mixDirty } from '../state.js';
+import { state, TEXT_KEYS, TEXT_LABEL, defaultStyle, totalDuration, activeSegment, persist, mixDirty, posLinked, setPosLink, applyTextPos, applyPosAllSegments } from '../state.js';
+import { syncNarrationToSegments, cleanNarrationTrack, voiceFor, voiceIsStale } from '../narration.js';
 import { fontOptionsHtml, allFonts, addCustomFont, ensureFont, fontInfo } from '../fonts.js';
 import { seek } from '../player.js';
 import { PALETTE, PRESETS } from '../presets.js';
@@ -47,6 +48,12 @@ export function initTextPanel(el) {
       <div class="sec-head">구간 제목·배지·자막 <span class="count" id="segCount"></span><span class="grow"></span>
         <button class="btn tiny" id="addSegBtn" type="button">+ 구간 추가</button>
       </div>
+      <div class="pos-link-row">
+        <label class="switch"><input type="checkbox" id="posLinkTgl" checked> 전체 자막 위치 같이 움직이기</label>
+        <span class="grow"></span>
+        <button class="btn tiny" id="applyPosAllBtn" type="button">현재 위치를 전체 자막에 적용</button>
+      </div>
+      <div class="seg-hint" id="posLinkHint">자막을 하나 끌거나 X·Y를 바꾸면 모든 구간 자막이 같은 위치로 일렬 정렬됩니다.</div>
       <div class="seg-list" id="segList"></div>
       <div class="seg-hint">구간을 나눠 제목·배지·자막을 시간대별로 바꿀 수 있습니다. 미리보기에서 글자를 끌면 위치가 바뀝니다.</div>
     </div>
@@ -56,6 +63,7 @@ export function initTextPanel(el) {
   styleCard = $('#styleCard', pane);
   segList = $('#segList', pane);
   fontPicker = $('#fontPicker', pane);
+  syncPosLinkUI();
 
   $('#addFontBtn', pane).addEventListener('click', () => fontPicker.click());
   fontPicker.addEventListener('change', async () => {
@@ -130,11 +138,50 @@ export function initTextPanel(el) {
 
   segList.addEventListener('click', onSegClick);
   segList.addEventListener('input', onSegInput);
+  segList.addEventListener('keydown', (e) => {
+    // 자막 칸에서 Enter는 줄바꿈만 (폼 제출·구간 닫힘 없음)
+    if (e.key === 'Enter' && e.target.matches && e.target.matches('textarea[data-segfield="subtitle"]')) {
+      e.stopPropagation();
+    }
+  });
+
+  const linkTgl = $('#posLinkTgl', pane);
+  linkTgl.addEventListener('change', () => {
+    setPosLink(linkTgl.checked);
+    if (linkTgl.checked) {
+      const cur = effectivePos(state.sel.text);
+      applyPosAllSegments(state.sel.text, cur.x, cur.y);
+      emit('toast', { msg: '지금 위치로 모든 구간 자막을 일렬 정렬했습니다.', type: 'ok' });
+    } else {
+      emit('toast', { msg: '이제 자막을 하나씩 따로 옮길 수 있습니다.' });
+    }
+    syncPosLinkUI();
+    afterEdit([]);
+  });
+  $('#applyPosAllBtn', pane).addEventListener('click', () => {
+    const cur = effectivePos(state.sel.text);
+    applyPosAllSegments(state.sel.text, cur.x, cur.y);
+    emit('toast', { msg: `${TEXT_LABEL[state.sel.text]} 위치를 모든 구간에 똑같이 적용했습니다.`, type: 'ok' });
+    afterEdit([]);
+  });
 
   renderFonts();
   renderPresets();
   renderStyleCard();
   renderSegments();
+}
+
+function syncPosLinkUI() {
+  const tgl = $('#posLinkTgl', pane);
+  if (tgl) tgl.checked = posLinked();
+  const hint = $('#posLinkHint', pane);
+  if (hint) {
+    hint.textContent = posLinked()
+      ? '자막을 하나 끌거나 X·Y를 바꾸면 모든 구간 자막이 같은 위치로 일렬 정렬됩니다. (제목·배지·자막 각각)'
+      : '지금은 구간마다 따로 움직입니다. 위 스위치를 켜면 모든 구간이 함께 정렬됩니다.';
+  }
+  const btn = $('#applyPosAllBtn', pane);
+  if (btn) btn.textContent = `현재 위치를 전체 ${TEXT_LABEL[state.sel.text]}에 적용`;
 }
 
 function afterEdit(panels) {
@@ -302,7 +349,7 @@ export function renderStyleCard() {
     </div>
     <div class="row">
       <span class="grow" style="font-size:10px;color:#66707f">미리보기에서 글자를 끌어 옮길 수도 있습니다.</span>
-      <button class="btn tiny" data-style-act="applyPos" type="button">이 위치를 모든 구간에 적용</button>
+      <button class="btn tiny" data-style-act="applyPos" type="button">현재 위치를 전체 ${TEXT_LABEL[key]}에 적용</button>
     </div>
     <div class="row">
       <span class="grow"></span>
@@ -325,13 +372,9 @@ function onStyleInput(e) {
 
   if (posField) {
     const v = clamp(Number(t.value) || 0, 0, posField === 'x' ? 1080 : 1920);
-    const seg = activeSeg();
-    if (seg) {
-      seg.pos = seg.pos || {};
-      seg.pos[state.sel.text] = { x: posField === 'x' ? v : (seg.pos[state.sel.text]?.x ?? st.x), y: posField === 'y' ? v : (seg.pos[state.sel.text]?.y ?? st.y) };
-    } else {
-      st[posField] = v;
-    }
+    const cur = effectivePos(state.sel.text);
+    const segNow = activeSeg();
+    applyTextPos(state.sel.text, posField === 'x' ? v : cur.x, posField === 'y' ? v : cur.y, segNow ? segNow.id : null);
     afterEdit([]);
     return;
   }
@@ -377,12 +420,8 @@ function onStyleClick(e) {
   } else if (act === 'applyPos') {
     const seg = activeSeg();
     const src = (seg && seg.pos && seg.pos[key]) || { x: st.x, y: st.y };
-    for (const s of state.project.segments) {
-      s.pos = s.pos || {};
-      s.pos[key] = { x: src.x, y: src.y };
-    }
-    st.x = src.x; st.y = src.y;
-    emit('toast', { msg: '이 위치를 모든 구간에 적용했습니다.', type: 'ok' });
+    applyPosAllSegments(key, src.x, src.y);
+    emit('toast', { msg: `${TEXT_LABEL[key]} 위치를 모든 구간에 똑같이 적용했습니다.`, type: 'ok' });
     afterEdit([]);
   }
 }
@@ -409,11 +448,18 @@ export function renderSegments() {
   const active = activeSegment(state.time);
   segList.innerHTML = segs.map((s, i) => {
     const open = state.sel.segment === s.id;
+    const vc = voiceFor(s.id);
+    const vBadge = vc
+      ? (voiceIsStale(vc)
+        ? '<span class="seg-vbadge stale" title="나레이션 대본이 지금 자막과 다릅니다 — 3번 음성·효과에서 다시 만들 수 있습니다">나레이션 대본 확인</span>'
+        : '<span class="seg-vbadge" title="이 구간에는 자막과 1:1 나레이션이 있습니다">나레이션 ✓</span>')
+      : '';
     return `<div class="seg-item${open ? ' open sel' : ''}" data-segid="${s.id}">
       <div class="seg-head" data-seghead="${s.id}">
         <span class="num">${i + 1}</span>
         <span class="times">${s.start.toFixed(1)} ~ ${s.end.toFixed(1)}초</span>
         <span class="grow"></span>
+        ${vBadge}
         ${active && active.id === s.id ? '<span style="font-size:9px;color:var(--accent)">재생 중</span>' : ''}
         <button class="icon-btn sm" data-segact="del" data-segid="${s.id}" type="button" title="구간 삭제">✕</button>
       </div>
@@ -425,8 +471,8 @@ export function renderSegments() {
         </div>
         <div class="seg-field"><label>제목</label><input type="text" data-segfield="title" data-segid="${s.id}" value="${escapeHtml(s.title || '')}" placeholder="예: 동키호테 쇼핑리스트 2탄"></div>
         <div class="seg-field"><label>배지</label><input type="text" data-segfield="badge" data-segid="${s.id}" value="${escapeHtml(s.badge || '')}" placeholder="예: BEST · 1+1"></div>
-        <div class="seg-field"><label>자막</label><input type="text" data-segfield="subtitle" data-segid="${s.id}" value="${escapeHtml(s.subtitle || '')}" placeholder="예: 일본 현지인 친구 추천"></div>
-        <div class="seg-hint">이 구간(${s.start.toFixed(1)}~${s.end.toFixed(1)}초)에만 표시됩니다.</div>
+        <div class="seg-field"><label>자막</label><textarea data-segfield="subtitle" data-segid="${s.id}" rows="${Math.max(1, Math.min(4, String(s.subtitle || '').split('\n').length))}" placeholder="예: 일본 현지인 친구 추천 (Enter로 두 줄)">${escapeHtml(s.subtitle || '')}</textarea></div>
+        <div class="seg-hint">이 구간(${s.start.toFixed(1)}~${s.end.toFixed(1)}초)에만 표시됩니다. 자막은 <b>Enter</b>로 두 줄·여러 줄까지 넣을 수 있습니다.</div>
       </div>
     </div>`;
   }).join('');
@@ -440,8 +486,12 @@ function onSegClick(e) {
     if (p.segments.length <= 1) { emit('toast', { msg: '구간은 최소 1개가 필요합니다.', type: 'err' }); return; }
     p.segments = p.segments.filter((s) => s.id !== id);
     if (state.sel.segment === id) state.sel.segment = p.segments[0].id;
+    // 사라진 구간의 나레이션도 같이 정리합니다(옛 목소리가 남아 겹치지 않게).
+    const n = cleanNarrationTrack({ forget: true });
+    syncNarrationToSegments({ prune: false });
+    if (n) emit('toast', { msg: `구간을 지우면서 그 구간 나레이션 ${n}개도 같이 지웠습니다.` });
     renderSegments();
-    afterEdit(['text']);
+    afterEdit(['audio']);
     return;
   }
   const head = e.target.closest('[data-seghead]');
@@ -475,8 +525,15 @@ function onSegInput(e) {
     if (tEl) tEl.textContent = `${seg.start.toFixed(1)} ~ ${seg.end.toFixed(1)}초`;
   } else {
     seg[field] = e.target.value;
+    // 여러 줄 자막은 입력한 만큼 칸이 늘어나게
+    if (field === 'subtitle' && e.target.tagName === 'TEXTAREA') {
+      const rows = Math.max(1, Math.min(4, String(e.target.value).split('\n').length));
+      if (e.target.rows !== rows) e.target.rows = rows;
+    }
   }
-  afterEdit([]);
+  // 자막 글자·시간을 고치면 그 구간 나레이션 대본·시작 시각도 즉시 같이 바뀅니다.
+  const sync = syncNarrationToSegments({ prune: false });
+  afterEdit(sync.changed ? ['audio'] : []);
   if (field === 'start' || field === 'end') {
     const idx = state.project.segments.indexOf(seg);
     const item = segList.querySelectorAll('.seg-item')[idx];
@@ -499,6 +556,7 @@ export function syncPositionInputs() {
 
 export function refreshTextPanel() {
   renderFonts();
+  syncPosLinkUI();
   renderStyleCard();
   renderSegments();
 }
