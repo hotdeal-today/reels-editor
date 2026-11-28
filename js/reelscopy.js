@@ -250,7 +250,7 @@ export function candidatesFromContext(ctx = {}, { limit = LINE_LIMIT, avoidFeatu
   // 같은 문단에 두 사실이 같이 있으면 짧게 압축한 한 줄도 후보로 (사람 말투)
   const textAll = `${join(ctx.before)} ${join(ctx.after)}`;
   const SYNTH = [
-    { re: /(조식|석식)[^.\n]{0,24}포함/, line: '조식 석식 포함이에요', w: 12 },
+    { re: /(조식|석식)[^.\n]{0,24}포함/, line: '조식 석식까지 포함이에요', w: 12 },
     { re: /(개인|전용)\s*정원[^.\n]{0,16}(노천탕|자쿠지)/, line: '개인 정원에 야외 노천탕', w: 11 },
   ];
   for (const r of SYNTH) if (r.re.test(textAll)) push(r.line, r.w, 'synth');
@@ -655,9 +655,14 @@ function planFromContexts(photos = [], { title = '', body = '', topic = '' } = {
   const sections = Array.from(new Set(photos.map((p) => String(p.section || '').trim()).filter((s) => s && !GENERIC_SEC.test(s))));
   let badge = '';
   if (sections.length >= 2) {
-    const f = firstFeature(firstSectionTexts(photos));
+    const first = firstSectionTexts(photos);
+    const all = photos.map((im) => `${(im.before || []).join(' ')} ${(im.after || []).join(' ')}`).join(' ');
+    const f = firstFeature(first);
     const short = f ? f.replace(/수$/, '') : '';
-    badge = short && noSpace(`${short} ${sections.length}곳`).length <= 6 ? `${short} ${sections.length}곳` : `${sections.length}곳`;
+    const extra = /독채/.test(all) ? '독채' : (/(오션뷰|바다)/.test(all) ? '오션뷰' : '');
+    const two = [extra, short].filter(Boolean).join(' ');
+    const tries = [`${two} ${sections.length}곳`, `${short} ${sections.length}곳`, `${sections.length}곳`].filter(Boolean);
+    badge = tries.find((b) => noSpace(b).length <= 6) || `${sections.length}곳`;
   } else {
     const f = firstFeature(firstSectionTexts(photos));
     if (f && noSpace(f).length <= 6) badge = f;
