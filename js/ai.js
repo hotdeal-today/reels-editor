@@ -8,7 +8,10 @@ import { DESIGN_SETS, presetById } from './presets.js';
 import {
   TEMPOS, tempoById, buildBeats, copyLinesFromText, layoutSegments, applyEndCard,
   endCardLines, hookRulesText, placementRulesText, CAPTION_LIMIT,
+  topicKindOf, topicKind, isPlaceKind, defaultCopy, checkCaption,
 } from './formula.js';
+import { buildPlanFromCuts, matchClipsToImages, cutContextBlock, buildHookBeats } from './reelscopy.js';
+import { loadBlogStore } from './blog.js';
 import { uid, clamp, round } from './util.js';
 import {
   AI_SETTINGS_KEY, DEFAULT_AI_SETTINGS, loadAiSettings, saveAiSettings, maskKey,
@@ -231,14 +234,14 @@ export function subtitleStats(segs, dur) {
 
 // ── 프롬프트 ────────────────────────────────────────────
 const SCHEMA = `{
-  "title": "릴스 제목 (12자 이내, 후킹)",
-  "badge": "배지 (6자 이내, 예: BEST · 1+1 · 무료 · 총정리)",
+  "title": "0~3초 후킹 한 줄 (13자 이내, 지명·상호만으로 시작 금지)",
+  "badge": "배지 (6자 이내, 사실만 — 예: 3곳 · 온천수 · 무료)",
   "design": "ref | neon | clean | bold 중 하나",
   "segments": [
-    { "start": 0, "end": 2.0, "title": "이 구간 제목(선택)", "badge": "이 구간 배지(선택)", "subtitle": "이 구간 자막(4~14자)", "motion": "zoomIn | zoomOut | none" }
+    { "cut": 1, "start": 0, "end": 2.0, "subtitle": "이 컷 자막 (4~13자, 연결어미)" }
   ],
-  "endcard": [ "윗줄 12자 이내 — 제품명·한 줄 요약", "아랫줄 — 1컷 후킹 그대로 반복" ],
-  "hook": "마지막 클릭 유도 멘트",
+  "endcard": [],
+  "hook": "",
   "sfx": [ { "type": "jjan | pop | swish | dingdong | ddoong | tadak | beep | shutter", "at": 0.0 } ]
 }`;
 
@@ -252,23 +255,27 @@ function contextLine(tempo) {
   return `전체 길이 ${dur}초, 클립 ${summary.length}개 (${lines || '없음'}), 1컷 ${first}. 자막은 0초부터 ${dur}초까지 빈틈없이 ${spec.min}~${spec.max}초 간격으로 약 ${beats}개.`;
 }
 
-export function buildPrompt(topic, tempo) {
+export function buildPrompt(topic, tempo, opts = {}) {
+  const kind = opts.kind || topicKindOf({ title: topic, body: opts.body || '', topic });
+  const cutBlock = opts.cuts && opts.cuts.length ? cutContextBlock(opts.cuts) : '';
+  const cutCount = opts.cuts && opts.cuts.length ? opts.cuts.length : (state.project.clips || []).length;
   return [
     '너는 한국 여행·리빙 블로그 운영자가 쓰는 9:16 세로 릴스(인스타 릴스·네이버 클립) 자막 작가다.',
     '첨부한 사진/영상 프레임을 보고, 아래 JSON 스키마에 맞는 편집 세팅을 하나만 출력한다.',
     '',
-    hookRulesText(),
+    hookRulesText(kind),
     '',
     '[출력 규칙]',
     '- 한국어로 쓴다. 설명·인사·코드블록 없이 JSON 객체 하나만 출력한다.',
-    '- title: 12자 이내 후킹(숫자·지명 환영). 1컷 상단에 크게 뜨는 글자다.',
-    '- badge: 6자 이내 짧은 강조 (BEST, 1+1, 무료, 총정리, 필수템 등).',
-    `- subtitle: 한 줄 4~${CAPTION_LIMIT}자, 1줄, 해요체 구어체. 두 정보를 한 줄에 넣지 않는다.`,
+    `- segments는 정확히 ${cutCount}개. 각 구간에 "cut" 번호(1부터)를 붙이고, cut 1은 1번 사진, cut 2는 2번 사진의 자막이다. 사진 순서를 바꾸지 않는다.`,
+    '- title: 0~3초 후킹 한 줄(13자 이내). 숙소·여행은 지역 반전·거리+결과·공간 포인트, 상품은 숫자·문제·궁금증.',
+    '- badge: 6자 이내, 사실만(BEST·총정리·필수템 같은 평가어 금지).',
+    `- subtitle: 한 줄 4~${CAPTION_LIMIT}자, 1줄, 해요체 구어체. 그 컷 사진의 포인트 하나만. 두 정보를 한 줄에 넣지 않는다.`,
     '- segments: 0초부터 전체 길이 끝까지 빈틈없이. start/end는 초 단위 숫자이고 서로 겹치거나 빈 구간을 두지 않는다.',
-    '- 첫 구간(1컷) 자막은 문제 제기 한 줄, 바로 다음 구간은 "~하지 마세요" 금지 명령 한 줄로 후킹을 만든다.',
+    '- 각 자막은 연결어미(~고/~서/~며/~면)나 조사(~까지)로 끝내 이어 읽히게 한다. 컷마다 완결문·라벨 금지.',
     '- 화면에서 확인되는 사실(가격·기종·색·개수·거리)만 쓴다. 프레임에서 확인되지 않은 수치·효능은 쓰지 않는다.',
-    '- 마지막 구간의 자막은 hook과 같게 두고, hook은 댓글 유도("\'나도\' 남겨주세요") 또는 블로그 유도("자세한 내용은 본문에서 확인하세요👇") 중 하나.',
-    '- endcard: ["윗줄 12자 이내 — 제품명·한 줄 요약", "아랫줄 — 1컷 후킹 그대로 반복"]. 마지막 구간을 이 2줄 카드로 만든다.',
+    '- 가격은 70~80% 지점에서 한 번만, "~만 원대" "~부터"로 반올림한다. 컷마다 가격·스펙을 라벨처럼 나열하지 않는다.',
+    '- 마지막 1~2컷에 CTA 하나(꼭 저장해두세요 / 댓글에 \'정보\' 남겨주시면 보내드릴게요). 그 앞에 손해 방지 한 줄.',
     '- motion: 사진에는 zoomIn/zoomOut을 번갈아, 영상에는 none을 권장.',
     '- sfx: 최대 5개. 첫 등장 jjan, 화면 전환 swish, 핵심 강조 pop/ddingdong 중에서 at(초)과 함께 제안.',
     '- design: 흰 글씨+검정 외곽선 레퍼런스 톤은 ref, 밝고 정보성 글은 neon, 깔끔한 제품컷은 clean, 임팩트가 필요하면 bold.',
@@ -276,27 +283,32 @@ export function buildPrompt(topic, tempo) {
     '[지금 타임라인]',
     contextLine(tempo),
     topic ? `[주제] ${topic}` : '[주제] (첨부한 사진/영상에서 추론)',
+    cutBlock,
     '',
     '[출력 스키마]',
     SCHEMA,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 /** 채팅형 무료 AI(ChatGPT·Gemini)에 사진과 함께 붙여넣을 프롬프트 */
-export function buildChatPrompt(topic, tempo) {
+export function buildChatPrompt(topic, tempo, opts = {}) {
+  const kind = opts.kind || topicKindOf({ title: topic, body: opts.body || '', topic });
+  const cutBlock = opts.cuts && opts.cuts.length ? cutContextBlock(opts.cuts) : '';
+  const cutCount = opts.cuts && opts.cuts.length ? opts.cuts.length : (state.project.clips || []).length;
   return [
     '아래는 내가 만드는 9:16 세로 릴스(인스타 릴스·네이버 클립)다. 첨부한 사진/영상을 보고 편집 세팅을 JSON으로만 답해줘.',
     '',
-    hookRulesText(),
+    hookRulesText(kind),
     '',
     '[상황]',
     contextLine(tempo),
     topic ? `[주제] ${topic}` : '[주제] 첨부한 사진을 보고 네가 추론',
+    cutBlock,
     '',
     '[요청]',
-    '1) 제목·배지: 첫 3초에 시선을 끄는 한국어 문구(제목 12자, 배지 6자 이내)',
-    `2) 구간별 자막: 0초부터 전체 길이 끝까지 빈틈없이, 4~${CAPTION_LIMIT}자 한 줄, 해요체 구어체. 문제 제기 → 금지 명령 → 전환 → 기능(동작→결과) → 정보 → CTA 순서`,
-    '3) 마무리: endcard 2줄(윗줄 제품명·요약, 아랫줄 1컷 후킹 반복) + hook은 댓글 유도 또는 블로그 유도 한 문장',
+    '1) 제목·배지: 0~3초에 시선을 끄는 한국어 한 줄(제목 13자, 배지 6자 이내). 평가어(BEST·총정리·필수템) 금지',
+    `2) 구간별 자막: 정확히 ${cutCount}개. cut 번호를 붙이고, cut N은 N번 사진의 포인트 한 줄. 4~${CAPTION_LIMIT}자, 연결어미로 끝내 이어 읽히게`,
+    '3) 마무리: 마지막 1~2컷에 CTA 하나(저장·댓글 키워드). 그 앞에 손해 방지 한 줄',
     '4) 효과음 추천: 종류 + 넣을 초 (jjan=짠, pop=뽕, swish=쉭, dingdong=딩동, ddoong=두둥, tadak=타닥, beep=삐, shutter=찰칵)',
     '5) design: 흰 글씨+검정 외곽선 레퍼런스 톤이면 ref',
     '',
@@ -481,6 +493,7 @@ export function normalizePlan(obj) {
   plan.segments = segs.map((s) => {
     if (typeof s === 'string') return { start: NaN, end: NaN, title: '', badge: '', subtitle: clean(s), motion: '' };
     return {
+      cut: num(pick(s, ['cut', '컷', 'cutNo', 'cut_no', 'index', 'n'])),
       start: num(pick(s, ['start', '시작', 'from', 'startTime', 'start_time', 'startSec'])),
       end: num(pick(s, ['end', '끝', 'to', 'endTime', 'end_time', 'endSec', 'duration'])),
       title: clean(pick(s, ['title', '제목', 'headline', 'text1'])),
@@ -495,7 +508,6 @@ export function normalizePlan(obj) {
     let t = 0;
     for (const s of plan.segments) { s.start = round(t, 2); t += s.end; s.end = round(t, 2); }
   }
-
   let sfx = src.sfx || src.effects || src.sounds || src.효과음 || src.soundEffects || [];
   if (!Array.isArray(sfx)) sfx = [];
   plan.sfx = sfx.map((x) => {
@@ -566,12 +578,43 @@ export function autoLayout(opts = {}) {
   const hookText = clean(s.hook) || '자세한 내용은 본문에서 확인하세요👇';
   const CTA_TEXT = "'나도' 남겨주세요";
 
+  // 2-0) 블로그 글에서 온 컷이면: 사진 한 장 = 자막 한 줄로 1:1 매칭 (사진 문맥으로 생성)
+  let blogPlan = null;
+  try {
+    const blog = loadBlogStore();
+    if (blog && (blog.images || []).length) {
+      const ctxs = matchClipsToImages(clips, blog.images);
+      const hit = ctxs.filter(Boolean).length;
+      if (hit >= Math.min(clips.length, 3) && hit === clips.length) {
+        blogPlan = buildPlanFromCuts(ctxs, { title: blog.title, body: blog.body, topic: topic || blog.title });
+      }
+    }
+  } catch (e) { console.warn('[autoLayout] 블로그 문맥 매칭 건너뜀', e); }
+
+  if (blogPlan && blogPlan.segments.length) {
+    const segs = clips.map((c, i) => {
+      const src = blogPlan.segments.find((x) => Number(x.cut) === i) || {};
+      return {
+        id: uid('seg'),
+        start: round(clipStart(i), 2),
+        end: round(clipStart(i) + clipDur(c), 2),
+        title: i === 0 ? (blogPlan.title || '') : '',
+        badge: i === 0 ? (blogPlan.badge || '') : '',
+        subtitle: src.subtitle || '',
+        pos: {},
+      };
+    });
+    p.segments = layoutSegments(segs, clipDur(clips[0]));
+    if (s.design) applyDesignSet(s.design);
+  } else {
+
   // 2-1) 레퍼런스 공식(문제 제기 → 전환 → 해결·체감 → 정보 → CTA)으로 자막을 채웁니다.
-  //  · 카피 틀(s.copyLines)이 있으면 그 줄을, 없으면 formula.js 기본 틀을 씁니다.
+  //  · 카피 틀(s.copyLines)이 있으면 그 줄을, 없으면 주제별 기본 틀을 씁니다.
   //  · 없는 사실(가격·효능)은 기본 틀이 지어내지 않습니다 — 화면에 보이는 것만 Gemini가 채웁니다.
+  const kind = topicKindOf({ title: head.title || name, body: '', topic });
   const copy = copyLinesFromText(s.copyLines);
-  const poolLines = buildBeats({ count: Math.max(1, copy.length || 9), topic, name, copy: copy.length ? copy : null });
-  const lines = buildBeats({ count: Math.max(1, beats), topic, name, copy: copy.length ? copy : null });
+  const poolLines = buildBeats({ count: Math.max(1, copy.length || 9), topic, name, copy: copy.length ? copy : null, kind });
+  const lines = buildBeats({ count: Math.max(1, beats), topic, name, copy: copy.length ? copy : null, kind });
   const ctaLine = poolLines.length ? poolLines[poolLines.length - 1] : CTA_TEXT;
 
   const segsBuild = Array.from({ length: Math.max(1, beats) }, (_, i) => ({
@@ -590,6 +633,7 @@ export function autoLayout(opts = {}) {
   }
   p.segments = layoutSegments(ensureSubtitleBeats(segsBuild, dur, tempo), clipDur(clips[0]));
   if (p.segments.length >= 5) applyEndCard(p.segments[p.segments.length - 1], endCardLines({ topic, name }));
+  }
   p.segments.sort((a, b) => a.start - b.start);
 
   // 3) 디자인
@@ -618,6 +662,9 @@ export function autoLayout(opts = {}) {
     duration: round(dur, 1),
     title: p.segments[0] ? p.segments[0].title : '',
     badge: p.segments[0] ? p.segments[0].badge : '',
+    matched: !!(blogPlan && blogPlan.segments.length),
+    kind: blogPlan ? blogPlan.kind : topicKindOf({ title: head.title || name, body: '', topic }),
+    lines: p.segments.map((sg) => String(sg.subtitle || '').trim()).filter(Boolean),
     subtitles: subtitleStats(p.segments, totalDuration()),
   };
 }
@@ -630,12 +677,28 @@ export function applyPlan(plan, opts = {}) {
   const dur = totalDuration();
   if (dur < 0.3) throw new Error('클립 길이가 너무 짧습니다.');
 
-  const list = plan.segments || [];
+  const list0 = plan.segments || [];
+  // 1-a) 컷 번호(cut)가 있으면 사진과 1:1로 잠급니다 — 시간 추정보다 우선합니다.
+  let cutLocked = false;
+  let list = list0;
+  const cutNums = list0.map((s) => Number(s.cut));
+  if (cutNums.length === clips.length && cutNums.every((n) => Number.isFinite(n))) {
+    const base = Math.min(...cutNums) === 1 ? 1 : 0;
+    const idx = cutNums.map((n) => n - base);
+    const unique = new Set(idx);
+    if (unique.size === clips.length && Math.min(...idx) === 0 && Math.max(...idx) === clips.length - 1) {
+      cutLocked = true;
+      list = idx.map((k, i) => ({ ...list0[i], cut: k })).sort((a, b) => a.cut - b.cut);
+    }
+  }
 
   // 1) 시간 계산
   let bounds = [];
   const timesOk = list.length && list.every((s) => isFinite(s.start) && isFinite(s.end) && s.end > s.start);
-  if (timesOk) {
+  if (cutLocked) {
+    // 사진 한 장 = 컷 하나 → 클립 시간 그대로
+    bounds = clips.map((c, i) => ({ start: clipStart(i), end: clipStart(i) + clipDur(c) }));
+  } else if (timesOk) {
     bounds = list.map((s) => ({ start: s.start, end: s.end }));
   } else if (list.length === clips.length) {
     bounds = clips.map((c, i) => ({ start: clipStart(i), end: clipStart(i) + clipDur(c) }));
@@ -716,9 +779,9 @@ export function applyPlan(plan, opts = {}) {
   }
 
   segs.sort((a, b) => a.start - b.start);
-  // 3-2) 최신 전체 길이 기준으로 0초~끝까지 1.5~2.3초 박자를 보장 (자막이 모자라면 자동 분할)
+  // 3-2) 최신 전체 길이 기준으로 0초~끝까지 박자를 보장 — 단, 사진 1:1(컷 잠금)이면 나누지 않습니다.
   const durNow = totalDuration();
-  let finalSegs = ensureSubtitleBeats(segs, durNow, loadAiSettings().tempo);
+  let finalSegs = cutLocked ? segs : ensureSubtitleBeats(segs, durNow, loadAiSettings().tempo);
   if (!finalSegs.length) finalSegs = segs;
   finalSegs.sort((a, b) => a.start - b.start);
   finalSegs[0].start = 0;

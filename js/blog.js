@@ -147,8 +147,11 @@ function isJunkLine(s) {
 function looksLikeHeading(s) {
   const t = String(s || '').trim();
   if (!t || t.length > 46) return false;
-  return /^(\d{1,2}[.)]\s|[①-⑳]|[▶▪◆■★☆●○■□]\s?|\d{1,2}\s*[장일화])/.test(t)
-    || /^(체크인|체크아웃|위치|가격|주차|조식|수영장|객실|주변|맛집|총정리|준비물|가는 방법|예약)/.test(t);
+  if (/^(\d{1,2}[.)]\s|[①-⑳]|[▶▪◆■★☆●○■□]\s?)/.test(t)) return true;
+  // "객실
+  if (t.length > 16) return false;
+  if (/(요|다|죠|네|까|고|서|며|면)[.!?~]?$/.test(t)) return false;
+  return /^(체크인|체크아웃|위치|가격|가격대|요금|특징|주차|조식|수영장|객실|주변|맛집|총정리|준비물|가는 방법|예약)$/.test(t);
 }
 
 function upscaleImage(url) {
@@ -172,6 +175,29 @@ function imageToken(url) {
 }
 
 const PLACEHOLDER_IMG = /(제목을.?입력|입력해주세요|no.?image|placeholder|기본이미지|blank|spacer)/i;
+const TABLE_LABEL = /^(위치|가격|가격대|요금|특징|체크인|체크아웃|체크인·아웃|체크인 ?\/ ?아웃|객실|객실 형태|객실 타입|객실 욕실|구분|지역|추천|1박 요금|주차|조식|수영장|주변|예약|준비물|면적|침대|주소|전화|운영시간)$/;
+const AD_DOMAIN = /^[a-z0-9-]+(?:\.[a-z0-9-]+){1,2}$/i;
+const AD_PROMO = /(마이리얼트립|아고다|트립닷컴|여기어때|부킹닷컴|클룩|야놀자|쿠팡).{0,20}(할인|예약|떠나|받아|최저가|쿠폰)|^\s*(할인쿠폰|쿠폰 받기|바로가기)/;
+const AD_IMG = /type=ff\d{2,4}_\d+|oglink|w_?proxy/i;
+
+/** 표 라벨(위치·가격대·특징 …)인지 — 소제목과 구분합니다. */
+function isTableLabel(t) {
+  const s = String(t || '').replace(/\s+/g, ' ').trim();
+  return s.length <= 12 && TABLE_LABEL.test(s);
+}
+
+/** 사진의 역할 — photo(실사진) · infocard(정보 표 캡처) · cover(도입 배너) · ad(제휴 링크 썸네일) */
+function imageRole({ url, beforeLines = [], afterLines = [], hasSection = false, index = 0, total = 0 }) {
+  if (AD_IMG.test(url)) return 'ad';
+  const near = [...afterLines.slice(0, 3), ...beforeLines.slice(-2)];
+  if (near.some((t) => AD_DOMAIN.test(t) || AD_PROMO.test(t))) return 'ad';
+  const labels = near.filter((t) => isTableLabel(t)).length;
+  if (labels >= 2) return 'infocard';
+  const addr = near.some((t) => t.length <= 60 && /[가-힣]+(?:시|군|구) [가-힣]+(?:면|동|읍|로) [가-힣0-9\-]+(?:로|길)? ?\d+/.test(t));
+  if (addr && near.some((t) => isTableLabel(t) || t.length <= 12)) return 'infocard';
+  if (!hasSection && index <= 1 && total >= 4) return 'cover';
+  return 'photo';
+}
 
 function acceptImageUrl(url, { cls = '', w = 0, h = 0 } = {}) {
   if (!url) return false;
@@ -185,7 +211,75 @@ function acceptImageUrl(url, { cls = '', w = 0, h = 0 } = {}) {
   return true;
 }
 
-/** HTML에서 제목·본문·사진(순서 + 사진 앞 문단) 뽑기 */
+/**
+ * 항목(텍스트·사진) 순서에서 사진마다 '앞뒤 문단 + 소제목'을 붙입니다.
+ *  · before/after = 그 사진을 설명하는 문단 (사진-자막 1:1 매칭의 근거)
+ *  · role = photo(실사진) · infocard(정보 표 캡처) · cover(도입 배너) · ad(제휴 링크 썸네일)
+ *  · ad·cover는 kept에서 빼고 dropped에 남깁니다.
+ */
+function assembleImages(items) {
+  const images = [];
+  const bodyLines = [];
+  let section = '';
+  let tail = false;   // "함께 보면 좋은 정보" 이후 = 다른 글 미리보기 → 본문·문맥에서 뻐
+  const TAIL_HEAD = /(함께 ?보면|관렵 ?글|인기 ?글|이런 ?글도|다른 ?글|최신 ?글|이전 ?글|다음 ?글)/;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.type === 'text') {
+      if (it.heading && TAIL_HEAD.test(it.text)) { tail = true; continue; }
+      if (tail) continue;
+      bodyLines.push(it.text);
+      if (it.heading && !isTableLabel(it.text)) section = it.text;
+      continue;
+    }
+    const beforeLines = [];
+    for (let j = i - 1; j >= 0 && beforeLines.length < 3; j--) {
+      const x = items[j];
+      if (x.type !== 'text' || x.heading || isTableLabel(x.text)) continue;
+      if (String(x.text).replace(/\s/g, '').length < 4) continue;
+      beforeLines.unshift(x.text);
+    }
+    const afterLines = [];
+    for (let j = i + 1; j < items.length && afterLines.length < 4; j++) {
+      const x = items[j];
+      if (x.type !== 'text') break;
+      if (x.heading || isTableLabel(x.text)) {
+        if (x.heading && TAIL_HEAD.test(x.text)) break;
+        continue;
+      }
+      if (String(x.text).replace(/\s/g, '').length < 4) continue;
+      afterLines.push(x.text);
+    }
+    images.push({
+      url: it.url,
+      alt: it.alt || '',
+      caption: tidyLine(afterLines[0] || beforeLines[beforeLines.length - 1] || it.caption || '').slice(0, 70),
+      section: section.slice(0, 40),
+      before: beforeLines.slice(0, 3).map((t) => String(t).slice(0, 120)),
+      after: afterLines.slice(0, 4).map((t) => String(t).slice(0, 120)),
+      index: images.length,
+      sectionIndex: 0,
+      role: 'photo',
+    });
+  }
+  const total = images.length;
+  images.forEach((im, i) => {
+    im.role = imageRole({ url: im.url, beforeLines: im.before || [], afterLines: im.after || [], hasSection: !!im.section, index: i, total });
+  });
+  const secSeen = new Map();
+  for (const im of images) {
+    const k = im.section || '';
+    const n = secSeen.get(k) || 0;
+    im.sectionIndex = n;
+    secSeen.set(k, n + 1);
+  }
+  const dropped = images.filter((im) => im.role === 'ad' || im.role === 'cover');
+  const kept = images.filter((im) => im.role !== 'ad' && im.role !== 'cover');
+  kept.forEach((im, i) => { im.index = i; });
+  return { kept, dropped, bodyLines };
+}
+
+/** HTML에서 제목·본문·사진(순서 + 앞뒤 문단) 뽑기 */
 export function parseBlogHtml(html, { pageUrl = '' } = {}) {
   let doc;
   try {
@@ -240,7 +334,7 @@ export function parseBlogHtml(html, { pageUrl = '' } = {}) {
       const key = imageToken(url);
       if (seenImg.has(key)) continue;
       seenImg.add(key);
-      items.push({ type: 'img', url, caption: lastPara || lastText, section: '' });
+      items.push({ type: 'img', url, alt: tidyLine(el.getAttribute('alt') || ''), caption: lastPara || lastText, section: '' });
       continue;
     }
     const text = tidyLine(el.innerText || el.textContent || '');
@@ -248,35 +342,20 @@ export function parseBlogHtml(html, { pageUrl = '' } = {}) {
     if (text === lastText) continue;
     lastText = text;
     if (!looksLikeHeading(text) && !/^\d{1,2}\.\s/.test(text)) lastPara = text;
-    items.push({ type: 'text', text, heading: looksLikeHeading(text) || tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' });
-  }
-
-  const images = [];
-  let section = '';
-  const bodyLines = [];
-  let lastCaption = '';
-  for (const it of items) {
-    if (it.type === 'text') {
-      bodyLines.push(it.text);
-      if (it.heading) section = it.text;
-      continue;
-    }
-    const caption = tidyLine(it.caption || '');
-    // 바로 앞 사진과 같은 설명이면 비워 두고 소제목을 씁니다.
-    const useCaption = caption && caption !== lastCaption ? caption : '';
-    if (useCaption) lastCaption = useCaption;
-    images.push({
-      url: it.url,
-      caption: useCaption.slice(0, 70),
-      section: section.slice(0, 40),
-      index: images.length,
+    items.push({
+      type: 'text', text,
+      heading: looksLikeHeading(text) || tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4'
+        || tag === 'blockquote' || (el.className || '').includes('se-quotation'),
+      quote: tag === 'blockquote' || (el.className || '').includes('se-quotation'),
     });
   }
+
+  const { kept, dropped, bodyLines } = assembleImages(items);
 
   let body = bodyLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   if (body.length > MAX_BODY_CHARS) body = body.slice(0, MAX_BODY_CHARS) + '\n…(이하 생략)';
   const hashtags = Array.from(new Set((body.match(/#[^\s#]{1,20}/g) || []).map((t) => t.trim())));
-  if (!images.length && ogImage) images.push({ url: ogImage, caption: '', section: '', index: 0 });
+  if (!kept.length && ogImage) kept.push({ url: ogImage, alt: '', caption: '', section: '', before: [], after: [], index: 0, sectionIndex: 0, role: 'photo' });
 
   if (!title && !body) return null;
   return {
@@ -284,8 +363,9 @@ export function parseBlogHtml(html, { pageUrl = '' } = {}) {
     title: title || '블로그 글',
     body,
     hashtags,
-    images,
-    thumbnail: ogImage || (images[0] && images[0].url) || '',
+    images: kept,
+    droppedImages: dropped.map((im) => ({ url: String(im.url || '').slice(0, 160), role: im.role })),
+    thumbnail: ogImage || (kept[0] && kept[0].url) || '',
     pageUrl,
   };
 }
@@ -302,15 +382,15 @@ export function parseBlogMarkdown(md, { pageUrl = '' } = {}) {
   let lastText = '';
   let lastPara = '';
   for (const line of content.split(/\r?\n/)) {
-    const imgs = Array.from(line.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g));
+    const imgs = Array.from(line.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g));
     if (imgs.length) {
       for (const m of imgs) {
-        const url = upscaleImage(m[1]);
+        const url = upscaleImage(m[2]);
         if (!acceptImageUrl(url, {})) continue;
         const key = imageToken(url);
         if (seen.has(key)) continue;
         seen.add(key);
-        items.push({ type: 'img', url, caption: lastPara || lastText });
+        items.push({ type: 'img', url, alt: tidyLine(m[1] || ''), caption: lastPara || lastText });
       }
       continue;
     }
@@ -319,20 +399,12 @@ export function parseBlogMarkdown(md, { pageUrl = '' } = {}) {
     if (text === lastText) continue;
     lastText = text;
     if (!looksLikeHeading(text) && !/^\d{1,2}\.\s/.test(text)) lastPara = text;
-    items.push({ type: 'text', text, heading: looksLikeHeading(text) });
+    // 마크다운 인용(> 제목)은 소제목으로 씁니다.
+    const quoted = /^\s*>/.test(line) && text.length <= 40;
+    items.push({ type: 'text', text, heading: looksLikeHeading(text) || quoted });
   }
-  const images = [];
-  const lines = [];
-  let section = '';
-  for (const it of items) {
-    if (it.type === 'text') {
-      lines.push(it.text);
-      if (it.heading) section = it.text;
-    } else {
-      images.push({ url: it.url, caption: tidyLine(it.caption).slice(0, 70), section: section.slice(0, 40), index: images.length });
-    }
-  }
-  let body = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const { kept, dropped, bodyLines } = assembleImages(items);
+  let body = bodyLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   if (body.length > MAX_BODY_CHARS) body = body.slice(0, MAX_BODY_CHARS) + '\n…(이하 생략)';
   const title = tidyLine((titleM && titleM[1]) || '').replace(/\s*[:|]\s*네이버\s*블로그\s*$/i, '');
   const hashtags = Array.from(new Set((body.match(/#[^\s#]{1,20}/g) || [])));
@@ -342,8 +414,9 @@ export function parseBlogMarkdown(md, { pageUrl = '' } = {}) {
     title: title || '블로그 글',
     body,
     hashtags,
-    images,
-    thumbnail: (images[0] && images[0].url) || '',
+    images: kept,
+    droppedImages: dropped.map((im) => ({ url: String(im.url || '').slice(0, 160), role: im.role })),
+    thumbnail: (kept[0] && kept[0].url) || '',
     pageUrl,
   };
 }

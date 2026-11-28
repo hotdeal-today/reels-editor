@@ -972,6 +972,17 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 .blog-info-head span { font-size: 9.5px; color: var(--muted); }
 .blog-thumbs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin-top: 6px; }
 .blog-thumbs img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 5px; background: #0b0e13; display: block; }
+
+/* 컷별 사진 문맥 → 자막 (사진-자막 1:1 확인표) */
+.blog-cuts { margin: 8px 0; padding: 8px 10px; background: #0f1319; border: 1px solid var(--line); border-radius: 9px; }
+.blog-cuts .cm-head { font-size: 10.5px; color: var(--muted); margin-bottom: 5px; }
+.blog-cuts .cm-list { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; }
+.blog-cuts .cm-row { font-size: 11px; line-height: 1.45; }
+.blog-cuts .cm-row b { color: var(--accent, #ff9a3c); font-weight: 700; margin-right: 3px; }
+.blog-cuts .cm-ctx { color: var(--muted); margin-right: 4px; }
+.blog-cuts .cm-ctx::after { content: '·'; margin-left: 4px; }
+.blog-cuts .cm-line { color: #e9eef6; }
+.blog-cuts .cm-row.label .cm-line, .blog-cuts .cm-row.eval .cm-line { color: #ff8a8a; }
 .blog-actions { margin-top: 8px; }
 
 /* ── 캐러셀 카드 편집기 ─────────────────────────────-- */

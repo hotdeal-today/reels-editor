@@ -16,7 +16,8 @@ import { cardsFromImages, cardsFromTimeline, saveCarousel } from '../carousel.js
 import { reloadCarouselFromProject } from './export.js';
 import { makeClip } from '../media.js';
 import { DESIGN_SETS } from '../presets.js';
-import { DEFAULT_COPY } from '../formula.js';
+import { DEFAULT_COPY, defaultCopy, topicKindOf, checkCaption, hookRulesText } from '../formula.js';
+import { buildPhotoPlan, repairPlan, describeLines, isReelPhoto, cutContextBlock } from '../reelscopy.js';
 import {
   buildNarration, narrationReport, cleanNarrationTrack, syncNarrationToSegments,
 } from '../narration.js';
@@ -87,6 +88,7 @@ export function initAiPanel(el) {
         </div>
         <div class="ai-status hidden" id="blogStatus"></div>
         <div class="blog-info hidden" id="blogInfo"></div>
+        <div class="blog-cuts hidden" id="blogCuts"></div>
         <div class="row blog-actions" style="gap:6px">
           <button class="btn primary grow" id="blogMakeReel" type="button">⚡ 릴스 만들기</button>
           <button class="btn grow" id="blogMakeCarousel" type="button">🖼 캐러셀</button>
@@ -405,6 +407,30 @@ async function syncNarrationAfterLayout() {
   }
 }
 
+/** 지금 타임라인 클립에 붙은 블로그 사진 문맥(컷 번호·소제목·앞뒤 문단) — 프롬프트에 넘깁니다. */
+function currentCutContexts() {
+  const blog = loadBlogStore();
+  const clips = (state.project && state.project.clips) || [];
+  if (!blog || !blog.images || !clips.length) return [];
+  const byAsset = new Map();
+  for (const im of blog.images) if (im && im.assetId) byAsset.set(im.assetId, im);
+  return clips.map((c, i) => {
+    const im = c && c.assetId ? byAsset.get(c.assetId) : null;
+    return im ? { cut: i + 1, section: im.section || '', before: im.before || [], after: im.after || [], alt: im.alt || '' } : { cut: i + 1 };
+  });
+}
+
+function promptOpts() {
+  const cuts = currentCutContexts();
+  const blog = loadBlogStore();
+  const topic = $('#aiTopic', pane).value.trim();
+  return {
+    cuts,
+    body: (blog && blog.body) || '',
+    kind: topicKindOf({ title: (blog && blog.title) || topic, body: (blog && blog.body) || '', topic }),
+  };
+}
+
 function bindEvents() {
   // 설정 변경 저장
   ['aiDesignSel', 'aiImageDur', 'aiTempo', 'aiCopyLines', 'aiUseSfx', 'aiUseName', 'aiTopic', 'aiAutoTts'].forEach((id) => {
@@ -425,8 +451,9 @@ function bindEvents() {
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       const sub = res.subtitles || {};
       const subTxt = sub.count ? ` · 자막 ${sub.count}개(0~${res.duration}초, 가장 큰 빈 구간 ${sub.maxGap}초)` : '';
-      emit('toast', { msg: `원클릭 배치 완료 — 컷 ${res.clips}개 · 구간 ${res.segments}개${subTxt} · 효과음 ${res.sfx}개 · ${res.design}`, type: 'ok' });
-      status(`원클릭 배치 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개, 자막 ${sub.count || 0}개가 0~${res.duration}초를 ${sub.maxGap > 0.4 ? `(가장 큰 빈 구간 ${sub.maxGap}초)` : '빈틈없이'} 덮습니다.`, 'ok');
+      const desc = res.matched ? '사진 문맥 1:1 매칭' : '기본 틀';
+      emit('toast', { msg: `원클릭 배치 완료 — 컷 ${res.clips}개 · 구간 ${res.segments}개${subTxt} · ${desc}`, type: 'ok' });
+      status(`원클릭 배치 완료(${desc}) — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개.`, 'ok');
       await syncNarrationAfterLayout();
     } catch (e) {
       emit('toast', { msg: e.message || '자동 배치에 실패했습니다.', type: 'err' });
@@ -434,9 +461,11 @@ function bindEvents() {
   });
 
   $('#aiCopyDefault', pane).addEventListener('click', () => {
-    $('#aiCopyLines', pane).value = DEFAULT_COPY.join('\n');
+    const kind = topicKindOf({ title: $('#aiTopic', pane).value || '', topic: $('#aiTopic', pane).value || '' });
+    const tpl = defaultCopy(kind);
+    $('#aiCopyLines', pane).value = tpl.join('\n');
     saveSettingsFromUI();
-    emit('toast', { msg: '레퍼런스 공식 기본 카피 틀을 넣었습니다. 문장은 자유롭게 고치세요.', type: 'ok' });
+    emit('toast', { msg: `${kind === 'stay' ? '숙소·여행' : kind === 'product' ? '제품' : '정보'} 자막 틀을 넣었습니다. 문장은 자유롭게 고치세요.`, type: 'ok' });
   });
 
   $('#aiCopyClear', pane).addEventListener('click', () => {
@@ -448,7 +477,7 @@ function bindEvents() {
   // 프롬프트
   $('#aiCopyPrompt', pane).addEventListener('click', async () => {
     saveSettingsFromUI();
-    const text = buildChatPrompt($('#aiTopic', pane).value.trim(), loadAiSettings().tempo);
+    const text = buildChatPrompt($('#aiTopic', pane).value.trim(), loadAiSettings().tempo, promptOpts());
     const ta = $('#aiPromptText', pane);
     if (ta) { ta.value = text; }
     try {
@@ -469,7 +498,7 @@ function bindEvents() {
     const ta = $('#aiPromptText', pane);
     if (!ta) return;
     if (ta.classList.contains('hidden')) {
-      ta.value = buildChatPrompt($('#aiTopic', pane).value.trim(), loadAiSettings().tempo);
+      ta.value = buildChatPrompt($('#aiTopic', pane).value.trim(), loadAiSettings().tempo, promptOpts());
       ta.classList.remove('hidden');
     } else {
       ta.classList.add('hidden');
@@ -480,11 +509,30 @@ function bindEvents() {
     const text = $('#aiPaste', pane).value.trim();
     if (!text) { emit('toast', { msg: 'AI가 준 JSON을 먼저 붙여넣어 주세요.', type: 'err' }); return; }
     try {
-      const plan = parsePlan(text);
+      const parsed = parsePlan(text);
+      // 블로그 글을 불러뒀으면: 컷 수를 맞추고 라벨·평가어·가격 나열 줄을 사진 문맥 줄로 바꿉니다.
+      let plan = parsed;
+      let notes = [];
+      const blog = loadBlogStore();
+      let mb = null;
+      if (blog && (blog.images || []).length) {
+        const local = blogPhotoPlan(blog);
+        const rep = repairPlan(parsed, local, (state.project.clips || []).length);
+        plan = rep.plan;
+        notes = rep.notes;
+        mb = blog;
+      }
       const res = applyPlan(plan);
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
-      status(`붙여넣기 적용 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개`, 'ok');
-      emit('toast', { msg: `자동 채우기 완료 (구간 ${res.segments}개)`, type: 'ok' });
+      const fixed = notes.length ? ` · 라벨·평가어 ${notes.length}곳을 사진 문맥에 맞게 교체` : '';
+      status(`붙여넣기 적용 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개)${fixed}`, 'ok');
+      emit('toast', { msg: `자동 채우기 완료 (구간 ${res.segments}개${notes.length ? ` · ${notes.length}곳 교정` : ''})`, type: 'ok' });
+      if (mb) renderCutMap(mb, plan);
+      else {
+        const bad = describeLines((plan.segments || []).map((sg) => sg.subtitle || '')).bad;
+        if (bad.length) status(`붙여넣기 적용 — 구간 ${res.segments}개 · 라벨·평가어 ${bad.length}줄은 직접 고쳐주세요: ${bad.slice(0, 3).join(' / ')}`, 'warn');
+      }
+      if (notes.length) console.info('[붙여넣기 교정]', notes);
       await syncNarrationAfterLayout();
     } catch (e) {
       status(e.message || '적용하지 못했습니다.', 'err');
@@ -560,7 +608,7 @@ function bindEvents() {
       if (!frames.length) throw new Error('사진·영상 프레임을 읽지 못했습니다. 파일을 다시 올려 주세요.');
       const videos = new Set(frames.filter((f) => /^영상/.test(f.label || '')).map((f) => (f.label || '').split(' ')[1])).size;
       status(`Gemini(${model})가 프레임 ${frames.length}장${videos ? `(영상 ${videos}개 × 2~3프레임)` : ''}을 보고 세팅을 만드는 중… (10~30초)`, 'warn');
-      const { plan } = await askGemini({ apiKey: s.apiKey, model, prompt: buildPrompt($('#aiTopic', pane).value.trim(), s.tempo), frames });
+      const { plan } = await askGemini({ apiKey: s.apiKey, model, prompt: buildPrompt($('#aiTopic', pane).value.trim(), s.tempo, promptOpts()), frames });
       const res = applyPlan(plan);
       emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
       status(`AI 세팅 완료 — 제목 “${res.title || '없음'}” · 구간 ${res.segments}개(자막 ${res.subtitles ? res.subtitles.count : 0}개) · 효과음 ${res.sfx}개`, 'ok');
@@ -744,7 +792,7 @@ async function loadBlogOneStop() {
   try {
     const picked = Number($('#blogMax', pane).value);
     const maxImages = Number.isFinite(picked) ? Math.max(0, picked) : 0; // 0 = 전체
-    const { post, images, via, found = 0, failed = 0 } = await loadBlogIntoProject(url, {
+    const { post, images, via, found = 0, failed = 0, dropped = 0, infoCards = 0 } = await loadBlogIntoProject(url, {
       maxImages,
       onProgress: (msg) => blogStatus(msg, 'warn'),
     });
@@ -762,7 +810,11 @@ async function loadBlogOneStop() {
     renderBlogInfo();
     emit('project', { panels: [] });
     const missNote = failed ? ` (${failed}장은 내려받지 못해 뺐습니다)` : '';
-    blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장${missNote} · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}`, images.length ? 'ok' : 'warn');
+    const skipNote = [
+      dropped ? `광고 링크·도입 배너 ${dropped}장 제외` : '',
+      infoCards ? `정보 표 사진 ${infoCards}장(릴스에서는 빠짐)` : '',
+    ].filter(Boolean).join(' · ');
+    blogStatus(`불러왔습니다 — “${post.title}” · 사진 ${images.length}장${missNote} · 본문 ${post.body.length.toLocaleString()}자${via ? ` (${via})` : ''}${skipNote ? `\n${skipNote}` : ''}`, images.length ? 'ok' : 'warn');
     // 5채널 캡션은 바로 만들기 (키 있으면 Gemini, 없으면 본문 기반)
     await makeCaptionsFromBlog({ silent: true, onlyEmpty: prevUrl === post.url });
   } catch (e) {
@@ -791,146 +843,84 @@ async function runBlogAction(kind) {
   }
 }
 
-function splitShortLines(text, max = 16) {
-  const src = String(text || '').replace(/[🔻▶▼▽★☆■◆●•]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!src) return [];
-  if (src.length <= max) return [src];
-  const words = src.split(' ');
-  const out = [];
-  let line = '';
-  for (const w of words) {
-    const test = line ? `${line} ${w}` : w;
-    if (test.length <= max || !line) line = test;
-    else { out.push(line); line = w; }
-  }
-  if (line) out.push(line);
-  return out.map((l) => l.replace(/[,·]$/, '').trim()).filter((l) => l.length >= 2);
+// ── 블로그 → 릴스 : 사진 1장 = 자막 1줄 ─────────────────
+/** 사진의 소제목·앞뒤 문단으로 만든 '이 사진의 포인트' 한 줄 (Gemini 키 없이도 1:1로 맞춤) */
+function blogPhotoPlan(blog) {
+  return buildPhotoPlan({
+    images: blog.images || [],
+    title: blog.title || '',
+    body: blog.body || '',
+    topic: ($('#aiTopic', pane).value || '').trim() || blog.title || '',
+  });
 }
 
-function blogHeadline(title) {
-  const t = String(title || '').replace(/[!?~]+$/, '').trim();
-  const first = t.split(/[,·|]/)[0].trim();
-  return first.length <= 14 ? first : `${first.slice(0, 13).trim()}…`;
+/** 컷 ↔ 사진 ↔ 자막을 눈으로 확인하는 표 (사진-자막 매칭 검증용) */
+function renderCutMap(blog, plan) {
+  const box = $('#blogCuts', pane);
+  if (!box) return;
+  const photos = (blog.images || []).filter(isReelPhoto);
+  if (!photos.length || !plan || !plan.segments) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  const rows = plan.segments.map((sg, i) => {
+    const im = photos[i] || {};
+    const sec = String(im.section || '사진').slice(0, 24);
+    const line = [sg.title, sg.subtitle].filter(Boolean).join(' / ');
+    const chk = checkCaption(sg.subtitle || '');
+    const warn = chk.label ? ' label' : (chk.evalWord ? ' eval' : '');
+    return `<li data-cut="${i + 1}" data-ctx="${escapeHtml(sec)}" class="cm-row${warn}"><b>컷 ${i + 1}</b> <span class="cm-ctx">${escapeHtml(sec)}</span> <span class="cm-line">${escapeHtml(line)}</span></li>`;
+  }).join('');
+  box.classList.remove('hidden');
+  box.innerHTML = `<div class="cm-head">컷별 사진 문맥 → 자막 (${plan.segments.length}컷 · ${plan.kindLabel || plan.kind || ''})</div><ol class="cm-list">${rows}</ol>`;
 }
 
-function blogBadge(body) {
-  const b = String(body || '');
-  const m = b.match(/(\d{1,2})\s*%/);
-  if (/1\s*\+\s*1/.test(b)) return '1+1';
-  if (m) return `${m[1]}% 할인`;
-  if (/무료/.test(b)) return '무료';
-  if (/할인|쿠폰/.test(b)) return '할인';
-  return '총정리';
-}
-
-function sentenceParts(text) {
-  return String(text || '')
-    .split(/(?<=[.!?~])\s+|\n+/)
-    .map((s) => s.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-}
-
-/** 자막 한 줄로 쓰기 좋은 문장을 고릅니다. (소제목 → 사진 앞 문단 → 본문 핵심 정보) */
-function blogLines(blog) {
-  const FILLER = /(달라질 수 있|경우가 있|수 있습니다|좋답니다|생각합니다|같습니다|정도입니다|보시면|알려드릴게요|시작해볼까요|다녀왔습니다|추천합니다)$/;
-  const GOOD = /(조식|수영장|객실|뷰|가격|할인|무료|주차|체크인|체크아웃|위치|도보|원|층|호|박|메뉴|어메니티|스파|사우나|바베큐|캠핑|전망|루프탑|라운지|키즈|프라이빗|예약|셔틀|공항|역)/;
-  const AD = /(마이리얼트립|아고다|트립닷컴|여기어때|부킹닷컴|클룩|야놀자|쿠팡|예약하기|바로가기|쿠폰|자세히 ?보기|상세 ?보기|더 ?보기)/;
-  const clean = (s) => String(s || '')
-    .replace(/^[\d]{1,2}[.)]\s*/, '')
-    .replace(/^[▼▶▪◆■●•\-\s]+/, '')
-    .replace(/\s+/g, ' ')
-    .replace(/[.!?~]+$/, '')
-    .trim();
-  const cands = [];
-  let order = 0;
-  const DANGLING = /(에|은|는|이|가|을|를|과|와|도|며|고|나|랑|으로|에서|부터|까지|보다|처럼|만|의|달라질|비교해|예약하는|추천하는)$/;
-  const tidyEnding = (t) => {
-    const words = String(t || '').trim().split(' ');
-    while (words.length > 1 && words.join(' ').length > 6) {
-      const last = words[words.length - 1];
-      if (DANGLING.test(last)) words.pop();
-      else break;
-    }
-    return words.join(' ');
-  };
-  const add = (raw, score) => {
-    const t0 = tidyEnding(clean(raw));
-    const t = t0;
-    if (!t || t.length < 5 || t.length > 20) return;
-    if (AD.test(t) || FILLER.test(t)) return;
-    cands.push({ t, score, order: order++ });
-  };
-
-  // ① 소제목 — 글의 흐름을 알려 주는 짧은 말
-  for (const img of blog.images || []) add(img.section, 2);
-  // ② 사진 바로 앞 문단 — 그 사진을 설명하는 문장
-  for (const img of blog.images || []) {
-    for (const s of sentenceParts(img.caption)) {
-      const t = clean(s);
-      if (t.length <= 20) add(t, 3 + (GOOD.test(t) ? 2 : 0) + (/\d/.test(t) ? 2 : 0));
-      else {
-        const clause = t.split(/[,·]/)[0].trim();
-        if (clause.length >= 8 && clause.length <= 20) add(clause, 2);
-      }
-    }
-  }
-  // ③ 본문의 가격·혜택 문장
-  for (const l of pickInfoLines(blog.body || '', 6)) add(l, 3);
-
-  const seen = new Set();
-  const picked = [];
-  for (const c of cands.slice().sort((a, b) => (b.score - a.score) || (a.order - b.order))) {
-    const key = c.t.replace(/\s/g, '');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    picked.push(c);
-    if (picked.length >= 12) break;
-  }
-  picked.sort((a, b) => a.order - b.order);
-  const lines = picked.map((c) => c.t);
-  if (!lines.length) lines.push(blogHeadline(blog.title));
-  return lines;
-}
-
-function buildBlogPlan(blog, totalDur) {
-  const lines = blogLines(blog).slice(0, 12);
-  const title = blogHeadline(blog.title);
-  const badge = blogBadge(blog.body);
-  const s = loadAiSettings();
-  return {
-    title: title || '오늘의 추천',
-    badge,
-    design: s.design || 'ref',
-    segments: lines.map((subtitle) => ({ subtitle })),
-    endcard: [blogHeadline(blog.title), lines[0] || ''],
-    hook: '자세한 후기는 블로그에서 확인하세요👇',
-    totalDur,
-  };
+function printCutMapConsole(blog, plan) {
+  const photos = (blog.images || []).filter(isReelPhoto);
+  const rows = (plan.segments || []).map((sg, i) => ({
+    cut: i + 1,
+    section: (photos[i] && photos[i].section) || '',
+    before: (photos[i] && photos[i].before) || [],
+    after: (photos[i] && photos[i].after) || [],
+    caption: [sg.title, sg.subtitle].filter(Boolean).join(' / '),
+    check: checkCaption(sg.subtitle || ''),
+  }));
+  console.table(rows.map((r) => ({ 컷: r.cut, 소제목: r.section, 자막: r.caption, 길이: r.check.len, 연결: r.check.connective ? 'O' : '-', 지적: r.check.notes.join(' ') })));
+  return rows;
 }
 
 function buildBlogReelPrompt(blog, totalSec) {
-  const body = String(blog.body || '').slice(0, 4000);
-  const caps = (blog.images || []).map((it, i) => `${i + 1}) ${it.caption || it.section || ''}`).join('\n');
+  const photos = (blog.images || []).filter(isReelPhoto);
+  const kind = topicKindOf({ title: blog.title || '', body: blog.body || '' });
+  const cuts = photos.map((im, i) => ({
+    cut: i + 1,
+    section: im.section || '',
+    before: im.before || [],
+    after: im.after || [],
+    alt: im.alt || '',
+  }));
+  const cutLines = cutContextBlock(cuts);
+  const body = String(blog.body || '').slice(0, 3000);
   return [
     '너는 한국 여행·리빙 블로그 운영자가 쓰는 9:16 릴스(네이버 클립·인스타 릴스) 자막 작가다.',
-    '아래 블로그 본문과 사진 설명을 읽고, 릴스 자막 세팅을 JSON 하나로만 답한다.',
+    '아래 블로그 본문과 [컷별 사진 문맥]을 읽고, 릴스 자막 세팅을 JSON 하나로만 답한다.',
+    '',
+    hookRulesText(kind),
     '',
     '[규칙]',
-    '- title: 12자 이내 후킹(지명·숫자 환영). badge: 6자 이내(할인·무료·총정리 등).',
-    `- segments: 0초부터 ${totalSec}초까지 빈틈없이, subtitle은 4~14자 한 줄 해요체 구어체.`,
-    '- 본문에 있는 사실(가격·혜택·위치·시간)만 쓴다. 사진에서 확인되지 않은 효능은 쓰지 않는다.',
-    '- 첫 구간은 문제 제기, 두 번째는 "~하지 마세요" 금지, 마지막은 CTA(자세한 후기는 블로그에서).',
+    '- title: 0~3초 후킹 한 줄(13자 이내). 숙소·여행은 지역 반전 · 거리+결과 · 가장 강한 매력 1개. 숙소명·가격 나열로 시작 금지.',
+    '- badge: 6자 이내, 사실만(BEST·총정리·필수템 같은 평가어 금지).',
+    `- segments는 정확히 ${photos.length}개. 각 구간에 \"cut\" 번호(1부터)를 붙이고, cut N의 자막은 N번 사진의 문맥에서 확인되는 포인트 하나만 쓴다. 사진 순서를 바꾸지 않는다.`,
+    '- subtitle은 4~13자 한 줄 해요체 구어체, 연결어미(~고/~서/~며/~면)나 조사(~까지)로 끝낸다. 컷마다 완결문·라벨 금지.',
+    '- 본문에 있는 사실(가격·혜택·위치·시간)만 쓴다. 가격은 70~80%에서 한 번만 \"~만 원대\"로. 컷마다 가격·스펙을 나열하지 않는다.',
+    '- 마지막 1~2컷에 CTA 하나(꼭 저장해두세요 / 댓글에 \'정보\'). 그 앞에 손해 방지 한 줄.',
     '- design: ref | neon | clean | bold 중 하나.',
     '',
-    `[전체 길이] ${totalSec}초`,
+    `[전체 길이] ${totalSec}초 · [컷 수] ${photos.length}`,
     `[블로그 제목] ${blog.title || ''}`,
-    '[사진 설명]',
-    caps || '(없음)',
+    cutLines,
     '[본문]',
     body || '(없음)',
     '',
     '[출력 스키마]',
-    '{"title":"릴스 제목","badge":"배지","design":"ref","segments":[{"start":0,"end":2,"subtitle":"자막"}],"endcard":["윗줄","아랫줄"],"hook":"마지막 멘트","sfx":[]}',
+    '{\"title\":\"0~3초 후킹\",\"badge\":\"사실 배지\",\"design\":\"ref\",\"segments\":[{\"cut\":1,\"start\":0,\"end\":2,\"subtitle\":\"자막\"}],\"endcard\":[],\"hook\":\"\",\"sfx\":[]}',
   ].join('\n');
 }
 
@@ -939,9 +929,11 @@ async function makeReelFromBlog(blog) {
   const imageDur = Number($('#blogImageDur', pane).value) || 2.6;
   const target = Number($('#blogTotal', pane).value) || 18;
   const replace = $('#blogReplace', pane).checked;
-  // 불러온 사진을 자르지 않고 전부 컷으로 넣습니다.
-  const images = (blog.images || []).slice();
+  // 실사진만 컷으로 넣습니다(정보 표 캡처·도입 배너·제휴 링크 썸네일 제외).
+  const all = blog.images || [];
+  const images = all.filter(isReelPhoto);
   if (!images.length) throw new Error('블로그 사진이 없어 릴스를 만들지 못했습니다.');
+  const infoCards = all.length - images.length;
 
   if (replace) state.project.clips = [];
   const per = clamp(target / images.length, 0.8, 5);
@@ -957,13 +949,17 @@ async function makeReelFromBlog(blog) {
   ensureSegments();
 
   const dur = totalDuration();
-  let used = '본문 기반';
+  // ① 사진 문맥으로 만든 1:1 자막(기본값). 키가 없어도 이대로 씁니다.
+  const localPlan = blogPhotoPlan(blog);
+  localPlan.kindLabel = { stay: '숙소·여행', travel: '여행지', product: '제품', info: '정보' }[localPlan.kind] || '';
+  let plan = localPlan;
+  let used = '사진 문맥 1:1';
+  let fixes = [];
   const s = loadAiSettings();
-  let applied = false;
   if (s.apiKey) {
     try {
       busyState(true);
-      blogStatus('Gemini가 블로그 글과 사진을 보고 자막을 다듬는 중…', 'warn');
+      blogStatus('Gemini가 컷별 사진 문맥을 보고 자막을 다듬는 중…', 'warn');
       let model = (availableModels && availableModels.text) || s.model;
       if (!availableModels) {
         const ids = await listModels(s.apiKey);
@@ -973,31 +969,37 @@ async function makeReelFromBlog(blog) {
         saveAiSettings({ model });
       }
       const raw = await askGeminiText({ apiKey: s.apiKey, model, prompt: buildBlogReelPrompt(blog, Math.round(dur)) });
-      const plan = parsePlan(raw);
-      if (plan && plan.segments && plan.segments.length) {
-        applyPlan(plan);
-        used = 'Gemini';
-        applied = true;
+      const gemini = parsePlan(raw);
+      if (gemini && gemini.segments && gemini.segments.length) {
+        // 컷 수를 맞추고, 라벨·평가어·가격 나열 줄은 사진 문맥 줄로 바꿉니다.
+        const repaired = repairPlan(gemini, localPlan, images.length);
+        plan = repaired.plan;
+        fixes = repaired.notes;
+        used = fixes.length ? `Gemini + ${fixes.length}곳 교정` : 'Gemini';
       }
     } catch (e) {
-      // 키·한도 문제로 실패하면 본문 기반으로
+      blogStatus(`Gemini를 쓰지 못해 사진 문맥으로 만들었습니다 (${e.message || '실패'})`, 'warn');
     } finally {
       busyState(false);
     }
   }
-  if (!applied) {
-    const plan = buildBlogPlan(blog, dur);
-    applyPlan(plan);
-  }
+  applyPlan(plan);
   seek(0);
   emit('project', { panels: ['clips', 'text', 'audio', 'ai'] });
   renderBlogInfo();
+  renderCutMap(blog, plan);
+  const rows = printCutMapConsole(blog, plan);
   const stats = subtitleStats(state.project.segments, totalDuration());
-  blogStatus(`릴스 준비 완료 — 컷 ${state.project.clips.length}개 · ${totalDuration().toFixed(1)}초 · 자막 ${stats.count}개 (${used})`, 'ok');
-  emit('toast', { msg: `블로그로 릴스를 만들었습니다 (${totalDuration().toFixed(1)}초 · ${used})`, type: 'ok' });
+  const grammar = describeLines(plan.segments.map((sg) => sg.subtitle).filter(Boolean));
+  const note = [
+    infoCards ? `정보 표 사진 ${infoCards}장은 릴스에서 뺐어요(캐러셀엔 들어갑니다)` : '',
+    fixes.length ? `Gemini 줄 ${fixes.length}곳을 사진 문맥에 맞게 고쳤어요` : '',
+  ].filter(Boolean).join(' · ');
+  blogStatus(`릴스 준비 완료 — 컷 ${state.project.clips.length}개 · ${totalDuration().toFixed(1)}초 · 자막 ${stats.count}개 (${used})${note ? ` · ${note}` : ''}`, 'ok');
+  emit('toast', { msg: `블로그로 릴스를 만들었습니다 (${state.project.clips.length}컷 · ${used})`, type: 'ok' });
+  console.info('[릴스 자막] 연결어미', `${grammar.connective}/${grammar.count}`, '지적', grammar.bad, rows.map((r) => `${r.cut}. ${r.caption} (${r.section})`));
   await syncNarrationAfterLayout();
 }
-
 async function makeCarouselFromBlog(blog) {
   const picked = Number($('#blogCarCount', pane).value);
   // 0 = 불러온 사진 전체

@@ -37,9 +37,18 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
   const skippedSmall = [];
   for (const f of files) {
     try {
+      const ctx = {
+        caption: f.caption || '',
+        section: f.section || '',
+        before: Array.isArray(f.before) ? f.before : [],
+        after: Array.isArray(f.after) ? f.after : [],
+        alt: f.alt || '',
+        role: f.role || 'photo',
+        sectionIndex: Number(f.sectionIndex) || 0,
+      };
       const known = (f.url && reuse.get(f.url)) || (f.file && reuseByName.get(f.file.name)) || '';
       if (known && getAsset(known)) {
-        images.push({ assetId: known, caption: f.caption || '', section: f.section || '', name: getAsset(known).name || '', url: f.url });
+        images.push({ assetId: known, ...ctx, name: getAsset(known).name || '', url: f.url });
         continue;
       }
       const { asset } = await importMediaFile(f.file);
@@ -53,8 +62,7 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
       }
       images.push({
         assetId: asset.id,
-        caption: f.caption || '',
-        section: f.section || '',
+        ...ctx,
         name: asset.name || '',
         url: f.url || '',
       });
@@ -94,6 +102,8 @@ export async function loadBlogIntoProject(url, { maxImages = 0, onProgress = () 
     loaded: images.length,       // 실제로 프로젝트에 들어간 수
     failed: Math.max(0, failed.length),            // 내려받기 실패
     skipped: Math.max(0, skippedSmall.length),     // 공지 배너 등 작아서 뺐음
+    dropped: (post.droppedImages || []).length,    // 광고 링크·도입 배너로 빼낸 수
+    infoCards: images.filter((im) => im.role === 'infocard').length,
   };
 }
 
