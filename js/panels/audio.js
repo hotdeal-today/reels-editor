@@ -514,30 +514,28 @@ function stopAuditionAudio() {
   }
 }
 
-function onVoiceAction(e) {
-  const actBtn = e.target.closest('[data-naract]');
-  if (actBtn) {
-    const act = actBtn.dataset.naract;
-    if (act === 'clean') {
-      const n = cleanNarrationTrack({ forget: true });
-      syncNarrationToSegments({ prune: false });
+function handleNarAction(act) {
+  if (act === 'clean') {
+    const n = cleanNarrationTrack({ forget: true });
+    syncNarrationToSegments({ prune: false });
+    renderNarration();
+    emit('project', { panels: ['audio'] });
+    emit('toast', { msg: n ? `자막과 안 맞는 옛 음성 ${n}개를 정리했습니다.` : '정리할 음성이 없습니다.', type: n ? 'ok' : '' });
+  } else if (act === 'sync' || act === 'unify') {
+    runNarration(act === 'unify' ? 'all' : 'sync');
+  } else if (act === 'offFull') {
+    if (state.project.audio.narration) {
+      state.project.audio.narration.on = false;
+      mixDirty();
+      persist();
+      renderFullNarration();
       renderNarration();
-      emit('project', { panels: ['audio'] });
-      emit('toast', { msg: n ? `자막과 안 맞는 옛 음성 ${n}개를 정리했습니다.` : '정리할 음성이 없습니다.', type: n ? 'ok' : '' });
-    } else if (act === 'sync' || act === 'unify') {
-      runNarration(act === 'unify' ? 'all' : 'sync');
-    } else if (act === 'offFull') {
-      if (state.project.audio.narration) {
-        state.project.audio.narration.on = false;
-        mixDirty();
-        persist();
-        renderFullNarration();
-        renderNarration();
-        emit('toast', { msg: '전체 나레이션 파일을 껐습니다(자막별 나레이션만 들립니다).', type: 'ok' });
-      }
+      emit('toast', { msg: '전체 나레이션 파일을 껐습니다(자막별 나레이션만 들립니다).', type: 'ok' });
     }
-    return;
   }
+}
+
+function onVoiceAction(e) {
   const btn = e.target.closest('[data-voiceact]');
   if (!btn) return;
   const id = btn.dataset.voiceid;
@@ -707,6 +705,9 @@ function renderSfxTracks() {
 
 // ── 이벤트 ────────────────────────────────────────────
 async function onClick(e) {
+  // 나레이션 경고 배너의 버튼(정리·다시 맞추기·전체 파일 끄기)은 패널 어디에 있든 여기서 처리합니다.
+  const narAct = e.target.closest('[data-naract]');
+  if (narAct) { handleNarAction(narAct.dataset.naract); return; }
   const prev = e.target.closest('[data-preview]');
   if (prev) {
     const key = prev.dataset.preview;
