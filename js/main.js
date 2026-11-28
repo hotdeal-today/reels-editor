@@ -113,6 +113,7 @@ function bindTabs() {
       $$('.pane').forEach((p) => p.classList.toggle('active', p.dataset.pane === activeTab));
       if (activeTab === 'export') refreshExportPanel();
       if (activeTab === 'ai') refreshAiPanel();
+      if (activeTab === 'audio') refreshAudioPanel();
       if (activeTab === 'text') { renderStyleCardSafe(); }
     });
   });
