@@ -17,7 +17,7 @@ import { reloadCarouselFromProject } from './export.js';
 import { makeClip } from '../media.js';
 import { DESIGN_SETS } from '../presets.js';
 import { defaultCopy, topicKindOf, checkCaption, hookRulesText } from '../formula.js';
-import { buildPhotoPlan, repairPlan, describeLines, isReelPhoto, cutContextBlock } from '../reelscopy.js';
+import { buildPhotoPlan, repairPlan, describeLines, isReelPhoto, cutContextBlock, isWeakCaption } from '../reelscopy.js';
 import {
   buildNarration, narrationReport, cleanNarrationTrack, syncNarrationToSegments,
 } from '../narration.js';
@@ -865,7 +865,7 @@ function renderCutMap(blog, plan) {
     const sec = String(im.section || '사진').slice(0, 24);
     const line = [sg.title, sg.subtitle].filter(Boolean).join(' / ');
     const chk = checkCaption(sg.subtitle || '');
-    const warn = chk.label ? ' label' : (chk.evalWord ? ' eval' : '');
+    const warn = isWeakCaption(sg.subtitle || '') ? (chk.evalWord ? ' eval' : ' label') : '';
     return `<li data-cut="${i + 1}" data-ctx="${escapeHtml(sec)}" class="cm-row${warn}"><b>컷 ${i + 1}</b> <span class="cm-ctx">${escapeHtml(sec)}</span> <span class="cm-line">${escapeHtml(line)}</span></li>`;
   }).join('');
   box.classList.remove('hidden');
@@ -908,7 +908,10 @@ function buildBlogReelPrompt(blog, totalSec) {
     '- title: 0~3초 후킹 한 줄(13자 이내). 숙소·여행은 지역 반전 · 거리+결과 · 가장 강한 매력 1개. 숙소명·가격 나열로 시작 금지.',
     '- badge: 6자 이내, 사실만(BEST·총정리·필수템 같은 평가어 금지).',
     `- segments는 정확히 ${photos.length}개. 각 구간에 \"cut\" 번호(1부터)를 붙이고, cut N의 자막은 N번 사진의 문맥에서 확인되는 포인트 하나만 쓴다. 사진 순서를 바꾸지 않는다.`,
-    '- subtitle은 4~13자 한 줄 해요체 구어체, 연결어미(~고/~서/~며/~면)나 조사(~까지)로 끝낸다. 컷마다 완결문·라벨 금지.',
+    '- subtitle은 4~14자 한 줄. 옆에서 친한 사람이 알려주듯 장면·체감·감정만 툭툭(예: "공용탕 말고 방 안 온천", "문 닫으면 우리만의 탕", "통창 너머가 전부 바다", "저녁엔 모닥불까지"). 안내방송·설명문 금지.',
+    '- 말끝을 억지로 바꾸지 않는다(~라서/~있어서 금지). 해요체·짧은 명사구·반문을 섞고, 같은 말끝을 2컷 연속 쓰지 않는다.',
+    '- 2컷은 1컷 후킹을 바로 받는다. 1~3컷은 숙소 핵심 매력만. 숙소가 바뀌는 컷만 숙소명을 넣어 구분하고, 같은 숙소 다음 컷에는 이름을 반복하지 않는다.',
+    '- 나이(5세부터)·체크인/체크아웃·전화 문의·홈페이지·주차 대수 같은 사소한 이용 규정은 자막에서 뺀다(마지막 주의 1컷만 예외).',
     '- 본문에 있는 사실(가격·혜택·위치·시간)만 쓴다. 가격은 70~80%에서 한 번만 \"~만 원대\"로. 컷마다 가격·스펙을 나열하지 않는다.',
     '- 마지막 1~2컷에 CTA 하나(꼭 저장해두세요 / 댓글에 \'정보\'). 그 앞에 손해 방지 한 줄.',
     '- design: ref | neon | clean | bold 중 하나.',

@@ -10,7 +10,7 @@
 //  (Gemini 키가 없어도 원클릭 결과가 사진과 1:1로 맞도록 하는 것이 목적)
 import { checkCaption, topicKindOf, isPlaceKind, topicKind, hasEvalWord, CAPTION_LIMIT } from './formula.js';
 
-export const LINE_LIMIT = 13;      // 공백 제외 4~13자 (report §3)
+export const LINE_LIMIT = 14;      // 공백 제외 4~14자 (인스타 자막 5원칙 · 앱 CAPTION_LIMIT)
 const MIN_LEN = 4;
 
 // ── 문자열 유틸 ─────────────────────────────────────────
@@ -57,52 +57,89 @@ export function clauseSplit(text) {
   return out.filter((s) => noSpace(s).length >= 2);
 }
 
-const CONNECTIVE = /(고|서|며|면|는데|지만|니까|러|려고|다가|거나|든지|해도|어도|라서|어서|해서|죠|네|더라고|거든|아야|어야|여야|으면|다면|라면|려면|잖아|거죠)$/;
-const PARTICLE = /(까지|부터|와|과|랑|이랑|로|으로|도|만)$/;
+// ── 말투 — 옆에서 알려주는 짧은 호흡 ─────────────────────
+//  v11 지침(예나님): 말끝을 기계적으로 ~라서/~있어서로 바꾸지 않습니다.
+//   · 원문의 사람 말투(해요체·회상·반문)와 짧은 명사구를 그대로 살립니다.
+//   · 숙소명·브랜드명을 주어로 세운 블로그 요약문("포천 온심재는 ~예요")은 주어를 떼고 장면부터 씁니다.
+//   · 같은 말끝이 2컷 연속 나오지 않게 endingClass 로 검사합니다.
+
+/** 설명체(~습니다/~입니다)만 해요체로 바꿉니다. 그 밖의 말끝은 건드리지 않습니다. */
+export function toSpoken(input) {
+  let t = String(input || '').trim().replace(/[.!?~,]+$/, '').trim();
+  if (!t) return '';
+  if (/습니다$/.test(t)) {
+    t = t
+      .replace(/있습니다$/, '있어요')
+      .replace(/없습니다$/, '없어요')
+      .replace(/합니다$/, '해요')
+      .replace(/됩니다$/, '돼요')
+      .replace(/집니다$/, '져요')
+      .replace(/깁니다$/, '겨요')
+      .replace(/옵니다$/, '와요')
+      .replace(/갑니다$/, '가요');
+    if (/(습니다|입니다)$/.test(t)) return '';
+  }
+  if (/입니다$/.test(t)) t = t.replace(/입니다$/, '이에요');
+  return t;
+}
+
+/** 말끝 종류 — 같은 말끝이 2컷 연속 나오지 않게 하는 데 씁니다. */
+export function endingClass(line) {
+  const t = String(line || '').trim();
+  if (!t) return '';
+  if (/\?$/.test(t)) return 'ask';
+  if (/(라서|어서|아서|해서|여서|나서|져서|와서|서)$/.test(t)) return 'seo';
+  if (/(고)$/.test(t)) return 'go';
+  if (/(면|으면|다면|려면)$/.test(t)) return 'myeon';
+  if (/(는데|지만|니까|며|다가|거나|든지|잖아|거든|더라고|더라구)$/.test(t)) return 'mid';
+  if (/(요|죠|네|까)$/.test(t)) return 'yo';
+  if (/(다)$/.test(t)) return 'da';
+  return 'noun';
+}
+
 // 줄 끝에 남으면 말이 안 되는 꼬리(부사·관형어) — 후보에서 뺍니다.
 const DANGLING = /(처럼|만큼|정도로|이나|하고|해서|위해|대한|같은|위한|하는|되는|있는|없는|잘|좀|더|덜|아주|너무|조용히|깔끔히|살짝|바로|특히|다시|먼저|역시|그리고|그래서|근데|하지만)$/;
 
-/** 해요체로 끝나는 말을 연결어미로 바꿉니다. (\"들어와요\" → \"들어와서\", \"있어요\" → \"있어서\") */
-export function toConnective(input) {
-  let t = String(input || '').trim().replace(/[.!?~,]+$/, '').trim();
-  if (!t) return '';
-  if (CONNECTIVE.test(t) || PARTICLE.test(t)) return t;
-  const map = [
-    [/이거든요$/, '이라서'],
-    [/거든요$/, '거든'],
-    [/더라고요$/, '더라고'],
-    [/더라구요$/, '더라구'],
-    [/다더라$/, '다더라'],
-    [/는데요$/, '는데'],
-    [/지요$/, '죠'],
-    [/네요$/, '네'],
-    [/해요$/, '해서'],
-    [/예요$/, '라서'],
-    [/이에요$/, '이라서'],
-    [/합니다$/, '하고'],
-    [/됩니다$/, '되고'],
-    [/입니다$/, '이고'],
-    [/있습니다$/, '있고'],
-    [/없습니다$/, '없고'],
-    [/습니다$/, '고'],
-  ];
-  for (const [re, rep] of map) if (re.test(t)) return t.replace(re, rep);
-  // "~하세요"는 그대로 둡니다(권유·주의 한 줄은 문장으로 읽힙니다).
-  if (/(으)?세요$/.test(t)) return t;
-  if (/요$/.test(t)) {
-    const stem = t.slice(0, -1);
-    if (/하$/.test(stem)) return `${stem.slice(0, -1)}해서`;
-    if (/되$/.test(stem) || /돼$/.test(stem)) return `${stem}서`;
-    if (vowelFinal(stem.slice(-1))) return `${stem}서`;
-    return `${stem}어서`;
+// ── 숙소명·브랜드명 주어 떼기 ─────────────────────────────
+const GENERIC_WORD = /^(온천수|온천|스파|객실|방|독채|노천탕|자쿠지|프라이빗|오션뷰|뷰|정원|테라스|루프탑|모닥불|조식|석식|다실|누마루|침대|욕실|탕|수영장|객실형|정보|질문|자주묻는|마무리|체크인|가격|위치|특징|추천|주의|준비물|코스|지도|교통|주차|후기|장점|단점|할인|쿠폰|예약|소개|정리|비교|목차|지역|구분|오늘|이번|지금|여행|숙소)$/;
+// 이름에 붙어 다니는 말(호텔 치유, ○○리조트) — 이름의 일부로 봅니다.
+const NAME_PART = /^(호텔|리조트|펜션|모텔|빌라|풀빌라|스테이|료칸|여관|민박)$/;
+
+/** 글의 소제목·제목에서 숙소명·브랜드명 후보를 모읍니다. */
+export function placeNames(photos = [], title = '') {
+  const set = new Set();
+  const add = (s) => {
+    const t = String(s || '').replace(/[^가-힣]/g, '');
+    if (t.length >= 2 && t.length <= 8 && !GENERIC_WORD.test(t)) set.add(t);
+  };
+  for (const p of photos || []) for (const w of String((p && p.section) || '').split(/\s+/)) add(w);
+  for (const w of String(title || '').split(/[\s,·|\[\]()\/]+/)) add(w);
+  return set;
+}
+
+/** "포천 온심재는 방마다 욕실이 따로 있고" → "방마다 욕실이 따로 있고" (이름이 주어면 떼어 냅니다) */
+export function stripNameSubject(line, names = new Set()) {
+  const t = String(line || '').trim();
+  if (!t || !names || !names.size) return t;
+  const parts = t.split(/\s+/);
+  if (parts.length < 2) return t;
+  let i = 0;
+  for (; i < Math.min(3, parts.length); i++) {
+    const w = parts[i].replace(/[,.!?~]/g, '');
+    const m = w.match(/^(.+?)(은|는|이|가|의)$/);
+    if (!names.has(m ? m[1] : w)) break;
+    if (m) i += 1;                       // 이름+조사까지가 주어
   }
-  return t;
+  if (!i) return t;
+  const rest = parts.slice(i).join(' ').replace(/^(은|는|이|가|의)\s+/, '').trim();
+  if (noSpace(rest).length < MIN_LEN) return '';
+  return rest;
 }
 
 const HEAD_FILLER = ['저는', '저희는', '제가', '여기는', '여기가', '거기는', '그래서', '그리고', '하지만', '다만', '역시', '정말', '너무', '아주', '진짜', '사실', '그냥', '근데', '또'];
 const TAIL_FILLER = /(생각이 들었|느낌이었|기분이었|것 같아요|것 같았|좋았어요|좋더라고요|좋답니다|추천해요|추천합니다|만족했|편했어요|예뻤어요|멋졌어요|유명해요|많아요|많더라고요)$/;
 
-const FUNC_WORD = /^(해도|하고|에서|으로|부터|까지|까지는|이라|라고|라서|인데|이고|이며|이랑|랑|은|는|이|가|을|를|에|의|도|만|과|와|게|지|데|데다|나|야|요|고|서|며|면)$/;
+const FUNC_WORD = /^(해도|하고|에서|으로|부터|까지|까지는|이라|라고|라서|인데|이고|이며|이랑|랑|은|는|이|가|을|를|에|의|도|만|과|와|게|지|데|데다|나|야|요|고|서|며|면|대신|너머|그리고|여기는|거기는)$/;
 
 /** 4~13자로 맞춥니다. 앞 군더더기를 빼고, 그래도 길면 앞쪽 단어를 버려 서술어(끝)를 살립니다. */
 export function fitLine13(input, limit = LINE_LIMIT) {
@@ -140,6 +177,12 @@ export function fitLine13(input, limit = LINE_LIMIT) {
 // ── 후보 뽑기 ───────────────────────────────────────────
 const FEATURE = /(온천수|온천|자쿠지|노천탕|스파|사우나|수영장|오션뷰|바다|통창|뷰|전망|정원|테라스|루프탑|모닥불|침대|조식|석식|티클래스|미온수|독채|프라이빗|다실|누마루|온수|주차|셔틀|객실|탕|욕실|창|아침|밤|노을)/;
 const IMPRESSION = /(좋았|좋더라|만족|추천|편했|예뻤|멋졌|훌륭|인상적|기분|완벽|최고|대박)/;
+// 핵심 매력 — 자막 1순위로 뽑는 시각적·감성적 키워드 (v11)
+const CORE_APPEAL = /(온천수|온천|노천탕|자쿠지|스파|사우나|찜질|온수|미온수|오션뷰|바다|통창|독채|프라이빗|개인 ?정원|정원|테라스|루프탑|모닥불|불멍|장작|바비큐|BBQ|누마루|다실|조식|석식|욕조|침대|노을|일몰|야경)/;
+// 장면·체감 — 옆에서 알려주는 말투인지 보는 신호 (v11)
+const SCENE = /(창|너머|안|옆|밤|저녁|아침|새벽|물|불|바다|하늘|침대|탕|욕실|문|조명|노을|눈|비|향|온기|김|소리|바람|정원|테라스|누마루|다실|보이|펼쳐|담그|앉아|누워|켜지|들어와|나와|돌아|살아|미끈|따뜻|시원|번지|비치|열리|닫|놓여|서 있)/;
+// 자잘한 이용 안내·규정 — 자막 후보에서 뺍니다(마지막 손해 방지 1컷은 lossLine 이 따로 씁니다)
+const TRIVIA = /(\d{1,2}\s*세\s*(부터|이상|미만|이하)|만\s*\d{1,2}\s*세|체크인|체크아웃|전화\s*(문의|연락|번호)|홈페이지|공식\s*사이트|소요\s*시간|이동\s*시간|영업\s*시간|운영\s*시간|예약\s*문의|문의\s*(전화|주세요)|와이파이|Wi-?Fi|수용\s*인원|\d+\s*인\s*기준|객실\s*\d+\s*(실|개)|주차\s*(장)?\s*\d+\s*대|\d+\s*대\s*주차)/;
 
 /** 자막에 들어간 대표 소재(온천수·자쿠지…) — 앞 컷과 같은 소재가 반복되면 점수를 낮춥니다. */
 export function featureOf(line) {
@@ -155,9 +198,12 @@ export function isPriceLine(line) {
 /**
  * 사진 한 장의 문맥에서 자막 후보를 뽑습니다.
  *  · before/after 줄들을 한 문단으로 붙쳐 다시 문장으로 나눕니다(줄바꿈으로 끊긴 말을 살립니다).
+ *  · v11: 말끝을 억지로 바꾸지 않고(해요체·명사구 그대로), 나이·체크인 같은 자잘한 규정은 빼고,
+ *         온천수·노천탕·오션뷰 같은 핵심 매력과 장면·체감 문장을 먼저 뽑습니다.
  * @param {{section?:string, before?:string[]|string, after?:string[]|string, alt?:string}} ctx
+ * @param {{limit?:number, avoidFeatures?:string[], names?:Set<string>}} opts
  */
-export function candidatesFromContext(ctx = {}, { limit = LINE_LIMIT, avoidFeatures = [] } = {}) {
+export function candidatesFromContext(ctx = {}, { limit = LINE_LIMIT, avoidFeatures = [], names = null } = {}) {
   const avoid = new Set((avoidFeatures || []).filter(Boolean));
   const join = (v) => (Array.isArray(v) ? v.join(' ') : String(v || ''));
   const afterLines = clauseSplit(join(ctx.after));
@@ -166,34 +212,48 @@ export function candidatesFromContext(ctx = {}, { limit = LINE_LIMIT, avoidFeatu
   const seen = new Set();
   const push = (cl, weight, src) => {
     if (!cl) return;
-    const raw = String(cl).replace(/^\s*(Q|A|Q\.|A\.|질문|답변)\s*[.:]\s*/i, '').trim();
+    let raw = String(cl).replace(/^\s*(Q|A|Q\.|A\.|질문|답변)\s*[.:]\s*/i, '').trim();
     if (!raw) return;
     if (hasEvalWord(raw)) return;
     if (TAIL_FILLER.test(raw)) return;
+    if (TRIVIA.test(raw)) return;                       // 나이·체크인·전화·주차 대수 등 이용 안내 제외
+    if (names && names.size) raw = stripNameSubject(raw, names);   // 같은 숙소가 이어지면 이름은 반복하지 않음
+    if (!raw) return;
     // 물음표·의문 말끝은 반문형으로 살립니다(말끝을 억지로 바꾸지 않음).
     const isQ = /\?$/.test(raw) || /(인가|는가|나|을까|까|죠)요$/.test(raw);
-    const line = isQ ? fitLine13(raw.replace(/요$/, '?'), limit) : fitLine13(toConnective(raw), limit);
+    const line = isQ ? fitLine13(raw.replace(/요$/, '?'), limit) : fitLine13(toSpoken(raw), limit);
     const len = noSpace(line).length;
     if (len < MIN_LEN || len > limit) return;
     if (DANGLING.test(line)) return;
+    if (TRIVIA.test(line)) return;
     const key = noSpace(line);
     if (seen.has(key)) return;
     seen.add(key);
     const chk = checkCaption(line);
     if (chk.evalWord) return;
     let score = weight;
-    if (FEATURE.test(line)) score += 3;
-    if (chk.connective) score += 2;
-    if (chk.label) score -= 5;
-    if (isPriceLine(line)) score -= 7;                     // 가격 라벨 금지(report §2)
+    if (CORE_APPEAL.test(line)) score += 4;              // 핵심 매력 최우선
+    if (SCENE.test(line)) score += 2;                    // 장면·체감
+    if (chk.label) score -= (CORE_APPEAL.test(line) && len >= 5 ? 1 : 4);   // 짧은 명사구는 허용
+    if (isPriceLine(line)) score -= 7;                   // 가격 라벨 금지(report §2)
     if (IMPRESSION.test(line)) score -= 2;
-    if (/^\S{1,3}\s/.test(line)) score -= 1;               // "그 방은" 같은 지시어로 시작
+    if (/^\S{1,3}\s/.test(line)) score -= 1;             // "그 방은" 같은 지시어로 시작
     if (avoid.size && avoid.has(featureOf(line))) score -= 5;   // 앞 컷과 같은 소재 반복 방지
+    if (noSpace(raw).length > limit + 3) score -= 1;     // 앞을 잘라 낸 줄은 중간에서 시작해 끊겨 읽힘
+    if (/^(건|게|거|것|줄|데|때|수|그|이|저|요)\s/.test(line)) score -= 3;   // 조각처럼 시작하는 말
+    if (endingClass(line) === 'seo') score -= 2;         // ~라서/~있어서가 기본값이 되지 않게
     if (len >= 5 && len <= 11) score += 1;
     out.push({ line, score, src, len });
   };
   afterLines.slice(0, 8).forEach((cl, i) => push(cl, 8 - Math.min(i, 4), 'after'));
   beforeLines.slice(0, 5).forEach((cl, i) => push(cl, 7 - Math.min(i, 3), 'before'));
+  // 같은 문단에 두 사실이 같이 있으면 짧게 압축한 한 줄도 후보로 (사람 말투)
+  const textAll = `${join(ctx.before)} ${join(ctx.after)}`;
+  const SYNTH = [
+    { re: /(조식|석식)[^.\n]{0,24}포함/, line: '조식 석식 포함이에요', w: 12 },
+    { re: /(개인|전용)\s*정원[^.\n]{0,16}(노천탕|자쿠지)/, line: '개인 정원에 야외 노천탕', w: 11 },
+  ];
+  for (const r of SYNTH) if (r.re.test(textAll)) push(r.line, r.w, 'synth');
   if (ctx.alt && noSpace(ctx.alt).length >= MIN_LEN) push(ctx.alt, 4, 'alt');
   if (!out.length && ctx.section) push(ctx.section, 5, 'section');
   out.sort((a, b) => b.score - a.score);
@@ -203,19 +263,161 @@ export function candidatesFromContext(ctx = {}, { limit = LINE_LIMIT, avoidFeatu
 const keyOf = (line) => noSpace(line).slice(0, 5);
 
 /**
+ * 자막으로 약한 줄인지 — 평가어, 가격 나열, 또는 핵심 매력 없는 짧은 라벨.
+ *  v11: "바다 보면서 노천탕" 같은 짧은 명사구는 좋은 자막이라 약한 줄로 보지 않습니다.
+ */
+export function isWeakCaption(line) {
+  const t = String(line || '').trim();
+  if (!t) return true;
+  const chk = checkCaption(t);
+  if (chk.evalWord) return true;
+  if ((t.match(/\d+\s*만?\s*원/g) || []).length >= 2) return true;
+  if (chk.label && !CORE_APPEAL.test(t) && noSpace(t).length < 6) return true;
+  return false;
+}
+
+/**
  * 그 사진의 포인트 한 줄. 이미 쓴 줄·비슷한 줄은 건너뜁니다.
+ *  · avoidEndings 에 든 말끝(앞 컷과 같은 말끝)은 먼저 피하고, 대안이 없을 때만 씁니다.
  * @returns {string}
  */
-export function pickPointLine(ctx = {}, { used = new Set(), limit = LINE_LIMIT, avoid = [], avoidFeatures = [] } = {}) {
+export function pickPointLine(ctx = {}, { used = new Set(), limit = LINE_LIMIT, avoid = [], avoidFeatures = [], avoidEndings = [], names = null } = {}) {
   const usedKeys = new Set([...used].map(keyOf).concat(avoid.map(keyOf)));
-  const cands = candidatesFromContext(ctx, { limit, avoidFeatures });
-  for (const c of cands) {
-    if (c.score < 0) continue;
-    if (usedKeys.has(keyOf(c.line))) continue;
-    return c.line;
-  }
+  const cands = candidatesFromContext(ctx, { limit, avoidFeatures, names });
+  const SPEECH_END = new Set(['seo', 'yo', 'da', 'go', 'mid', 'myeon']);
+  const banned = new Set((avoidEndings || []).filter((c) => SPEECH_END.has(c)));
+  const take = (skipSame) => {
+    for (const c of cands) {
+      if (c.score < 0) continue;
+      if (usedKeys.has(keyOf(c.line))) continue;
+      if (skipSame && banned.has(endingClass(c.line))) continue;
+      return c.line;
+    }
+    return '';
+  };
+  const fresh = take(true);
+  if (fresh) return fresh;
+  const any = take(false);
+  if (any) return any;
   const first = cands[0];
   return first ? first.line : '';
+}
+
+/** 그 숙소 섹션의 문단을 전부 이어 붙입니다(2컷이 1컷 후킹을 받을 때 씁니다). */
+export function sectionPlainText(photos = [], section = '') {
+  const parts = [];
+  for (const im of photos || []) {
+    if (section && String(im.section || '') !== section) continue;
+    parts.push(...(im.before || []), ...(im.after || []));
+  }
+  return parts.join(' ');
+}
+
+/** 소제목에서 숙소 이름을 뽑습니다. ("포천 신북 온심재 온천수 스파 객실" → "포천 신북 온심재" / "온심재") */
+export function placeFromSection(section = '') {
+  const words = String(section || '').split(/\s+/).map((w) => w.replace(/[^가-힣A-Za-z0-9]/g, '')).filter(Boolean);
+  const keep = [];
+  for (const w of words) {
+    if (GENERIC_WORD.test(w) && !NAME_PART.test(w)) break;
+    keep.push(w);
+  }
+  if (!keep.length) return { full: '', short: '' };
+  return { full: keep.slice(0, 3).join(' '), short: keep[keep.length - 1] };
+}
+
+/**
+ * 숙소가 바뀌는 컷 — 새 숙소 이름을 자연스럽게 넣어 구분되게 합니다.
+ *   예) "포천 온심재는 전 객실 온천수예요" · "문경 사담재는 딱 4채뿐인 독채"
+ *       "통창 너머 바다 보이는 남해 호텔 치유"
+ */
+export function pickPlaceIntro(photos = [], index = 0, { used = new Set(), limit = LINE_LIMIT } = {}) {
+  const cur = photos[index] || {};
+  const sec = String(cur.section || '');
+  const { full, short } = placeFromSection(sec);
+  const text = sectionPlainText(photos, sec) || String((cur.before || []).join(' ') + ' ' + (cur.after || []).join(' '));
+  const usedKeys = new Set([...used].map(keyOf));
+  const fresh = (line) => line && !usedKeys.has(keyOf(line));
+  const out = (line) => (fresh(line) && noSpace(line).length >= MIN_LEN ? fitLine13(line, limit) : '');
+  // 이름은 될 수 있으면 온전히(문경 사담재), 길면 짧게(사담재)
+  const label = short || full;
+  const tryBoth = (make) => out(make(full || label)) || out(make(label));
+
+  // ① 바다·통창 — "통창 너머 바다 보이는 ○○"
+  if (/(통창|창문)[^.\n]{0,12}(바다|오션)|(바다|오션)[^.\n]{0,12}(통창|펼쳐)/.test(text) && label) {
+    const line = tryBoth((n) => `통창 너머 바다 보이는 ${n}`);
+    if (line) return line;
+  }
+  // ② 독채 N채 — "○○는 딱 4채뿐인 독채"
+  if (/독채/.test(text) && label) {
+    const m = text.match(/([0-9]+|한|두|세|네|다섯)\s*채/) || text.match(/독채\s*([0-9]+)\s*채/);
+    const num = m ? String(m[1]).replace(/한/, '1').replace(/두/, '2').replace(/세/, '3').replace(/네/, '4').replace(/다섯/, '5') : '';
+    const line = tryBoth((n) => (num ? `${n}는 딱 ${num}채뿐인 독채` : `${n}는 프라이빗 독채`));
+    if (line) return line;
+  }
+  // ③ 전 객실 온천수 — "○○는 전 객실 온천수예요"
+  if (/(전\s*객실|방마다|객실마다|온\s*객실)[^.\n]{0,14}온천/.test(text) && label) {
+    const line = tryBoth((n) => `${n}는 전 객실 온천수예요`);
+    if (line) return line;
+  }
+  // ④ 그 밖에는 섹션 문단의 핵심 매력 문장에 이름을 붙일 수 있으면 붙입니다.
+  const cands = candidatesFromContext({ after: text, section: sec }, { limit });
+  for (const c of cands) {
+    if (c.score < 0) continue;
+    if (!CORE_APPEAL.test(c.line)) continue;
+    const line = out(`${label}는 ${c.line}`.replace(/[.!?]$/, ''));
+    if (line) return line;
+  }
+  // ⑤ 이름을 못 붙이면 이름 없는 핵심 매력 한 줄
+  const plain = pickPointLine(cur, { used, limit });
+  return plain || `${label}부터 볼까요`;
+}
+
+/**
+ * 2컷 — 1컷 후킹("방 안에 온천수가?")을 바로 받는 한 줄.
+ *  · 1컷과 같은 숙소 섹션일 때만 씁니다(다른 숙소면 그 컷이 이름으로 새로 시작).
+ *  · "방마다/전 객실 + 그 매력"이 한 문장에 있으면 짧게 압축하고,
+ *    없으면 섹션 문단에서 후킹 소재가 들어간 장면 문장을 고릅니다.
+ */
+export function pickFollowLine({ photos = [], index = 1, hook = {}, used = new Set(), limit = LINE_LIMIT, names = null } = {}) {
+  const cur = photos[index] || {};
+  const prev = photos[index - 1] || photos[0] || {};
+  const sec = String(cur.section || prev.section || '');
+  if (!sec) return '';
+  if (prev.section && cur.section && prev.section !== cur.section) return '';
+  const feature = featureOf(hook.sub || '') || featureOf(hook.title || '') || firstFeature(sec);
+  if (!feature) return '';
+  const text = sectionPlainText(photos, sec);
+  const usedKeys = new Set([...used].map(keyOf));
+  const fresh = (line) => line && !usedKeys.has(keyOf(line));
+  // ① "방마다/전 객실 + 온천수"가 한 문장에 있으면 짧게 압축 — 후킹에 대한 바로 그 대답
+  const sameSent = String(text).split(/(?<=[.!?])\s+/).some((s) => {
+    const one = /(방마다|객실마다|전\s*객실|모든\s*(객실|방)|온\s*객실)/.test(s);
+    return one && s.includes(feature);
+  });
+  if (sameSent && /온천/.test(feature)) {
+    const head = /방마다|객실마다/.test(text) ? '방마다' : '전 객실';
+    const line = fitLine13(`${head} 온천수예요`, limit);
+    if (fresh(line) && noSpace(line).length >= MIN_LEN) return line;
+  }
+  // ② 섹션 문단에서 후킹 소재가 들어간 장면 문장
+  const cands = candidatesFromContext({ after: text, section: sec }, { limit, names });
+  let best = null;
+  const scoreOf = (c) => {
+    let s = c.score;
+    if (String(c.line).includes(feature) || featureOf(c.line) === feature) s += 6;
+    if (/(방마다|객실마다|전\s*객실|모든\s*(방|객실)|온\s*객실)/.test(c.line)) s += 5;
+    if (SCENE.test(c.line)) s += 2;
+    if (endingClass(c.line) === 'ask') s -= 3;
+    if (endingClass(c.line) === 'myeon') s -= 2;        // 1컷이 "~면"이면 2컷은 다른 말끝
+    return s;
+  };
+  for (const c of cands) {
+    if (c.score < 0) continue;
+    if (!fresh(c.line)) continue;
+    const s = scoreOf(c);
+    if (!best || s > best.s) best = { s, line: c.line };
+  }
+  return best ? best.line : '';
 }
 
 // ── 0~3초 후킹 ─────────────────────────────────────────
@@ -317,9 +519,19 @@ function dayOffLine(text) {
   return name && noSpace(`${name}은 ${days} 휴무`).length <= LINE_LIMIT ? `${name}은 ${days} 휴무` : `${days}는 휴무예요`;
 }
 
-export function lossLine(body = '', { section = '' } = {}) {
+export function lossLine(body = '', { section = '', avoidEnding = '' } = {}) {
   const b = String(body || '').replace(/\s+/g, ' ');
   const near = String(section || '');
+  // 예약이 빨리 빠지는 시즌 — "12월 주말은 벌써 빠지고 있어요" (v11)
+  const sc = b.match(/(\d{1,2})\s*월[^.\n]{0,16}(주말|토요일)[^.\n]{0,24}(매진|빠지|마감|서두르)/)
+    || b.match(/(주말|토요일)[^.\n]{0,20}(매진|빠지|마감)[^.\n]{0,16}/);
+  if (sc) {
+    const mon = b.match(/(\d{1,2})\s*월/);
+    const soft = fitLine13(mon ? `${mon[1]}월 주말은 벌써 빠지고 있어요` : '주말은 벌써 빠지고 있어요');
+    const flat = fitLine13(mon ? `${mon[1]}월 주말은 벌써 매진` : '주말은 벌써 매진');
+    const line = avoidEnding && endingClass(soft) === avoidEnding ? flat : soft;
+    if (noSpace(line).length >= MIN_LEN) return line;
+  }
   const rules = [
     { re: /(칫솔|치약)[^.\n]{0,24}(없|준비|챙기)/, make: () => '칫솔·치약은 챙기세요' },
     { re: /당일 예약[^.\n]{0,12}(안|어렵|불가)/, make: () => '당일 예약은 안 돼요' },
@@ -345,14 +557,16 @@ export function lossLine(body = '', { section = '' } = {}) {
   return '';
 }
 
-export function lossLineNear(body = '', { section = '' } = {}) {
-  const own = lossLine(section, { section });
+export function lossLineNear(body = '', { section = '', avoidEnding = '' } = {}) {
+  const own = lossLine(section, { section, avoidEnding });
   if (own) return own;
-  return lossLine(body, { section });
+  return lossLine(body, { section, avoidEnding });
 }
 
-export function ctaLine(kind = 'info') {
+export function ctaLine(kind = 'info', body = '') {
   const k = topicKind(kind);
+  // 연말·시즌 글은 '미리 저장'을 권합니다(v11 예나님 예시: 연말 전에 미리 저장해두세요).
+  if (/(연말|크리스마스|12\s*월|겨울|연휴)/.test(String(body || ''))) return '연말 전에 미리 저장해두세요';
   const list = (k.cta || []).slice();
   return list[0] || '꼭 저장해두세요';
 }
@@ -389,34 +603,62 @@ function planFromContexts(photos = [], { title = '', body = '', topic = '' } = {
   const cta = ctaLine(kind, body);
   if (!n) return { title: hook.title, badge: '', kind, segments: [], design: 'ref', endcard: [] };
 
+  const names = placeNames(photos, title);
   const used = new Set([hook.title, hook.sub]);
   const usedFeatures = [featureOf(hook.sub)];
+  const endings = [endingClass(hook.sub) || 'ask'];
   const segments = [{ cut: 0, title: hook.title, subtitle: hook.sub }];
   const lastTwo = n >= 5;
   const pointsEnd = lastTwo ? n - 2 : n - 1;   // 이 앞까지가 사진 포인트
+  const secOf = (i) => String((photos[i] && photos[i].section) || '').trim();
+
+  const lastIm = photos[n - 2] || {};
+  const loss = lastTwo ? lossLineNear(body, { section: String(lastIm.section || '') }) : '';
+  const placeDoc = isPlaceKind(kind);            // 숙소·여행 글에서만 '숙소 이름으로 새로 시작'을 씁니다
+  const META_SEC = /(자주 ?묻는|Q\s*&\s*A|FAQ|마무리|마지막|링크|함께 ?보면|정리|준비물|코스|지도|교통|안내|요약)/i;
 
   for (let i = 1; i < pointsEnd; i++) {
-    const line = pickPointLine(photos[i], { used, avoidFeatures: usedFeatures }) || pickPointLine(photos[i], {});
-    if (line) { used.add(line); usedFeatures.push(featureOf(line)); }
+    const newPlace = placeDoc && !!secOf(i) && secOf(i) !== secOf(i - 1) && !META_SEC.test(secOf(i));
+    let line = '';
+    if (newPlace) {
+      // 숙소가 바뀌는 컷 — 새 숙소 이름을 자연스럽게 넣어 구분되게
+      line = pickPlaceIntro(photos, i, { used });
+    } else {
+      // 같은 숙소가 이어지는 컷 — 이름은 반복하지 않고 핵심 매력만
+      if (i === 1) line = pickFollowLine({ photos, index: i, hook, used, names });
+      if (!line) line = pickPointLine(photos[i], { used, avoidFeatures: usedFeatures, avoidEndings: [endings[endings.length - 1]], names });
+    }
+    if (line) {
+      used.add(line);
+      usedFeatures.push(featureOf(line));
+      endings.push(endingClass(line));
+    }
     segments.push({ cut: i, subtitle: line || `사진 ${i + 1} 보시면` });
   }
   if (lastTwo) {
-    const lastIm = photos[n - 2] || {};
-    const loss = lossLineNear(body, { section: String(lastIm.section || '') });
-    const line = loss && !used.has(loss) ? loss : pickPointLine(lastIm, { used });
+    // 앞 컷과 말끝이 겹치면 손해 방지 줄을 다른 표현으로 바꿉니다.
+    let caution = loss;
+    if (caution && endings.length && endingClass(caution) === endings[endings.length - 1]) {
+      const alt = lossLineNear(body, { section: String(lastIm.section || ''), avoidEnding: endings[endings.length - 1] });
+      if (alt && !used.has(alt)) caution = alt;
+    }
+    const line = (caution && !used.has(caution) ? caution : '') || pickPointLine(lastIm, { used, names });
     segments.push({ cut: n - 2, subtitle: line || '여기까지 오셨으면' });
     segments.push({ cut: n - 1, subtitle: cta });
   } else {
     segments.push({ cut: n - 1, subtitle: cta });
   }
 
-  // 배지 — 평가어 대신 사실만 (숙소 3곳 / 온천수 등). 정보·제품 글엔 배지를 두지 않습니다.
+  // 배지 — 평가어 대신 사실만 (독채 온천 3곳 / 온천수 등). 정보·제품 글엔 배지를 두지 않습니다.
   if (!isPlaceKind(kind)) return { title: hook.title, badge: '', kind, segments, design: 'ref', endcard: [], hookFormula: hook.formula, cta };
   const GENERIC_SEC = /(자주 ?묻는|Q\s*&\s*A|FAQ|마무리|마지막|링크|함께 ?보면|정리|준비물|코스|지도|교통)/i;
   const sections = Array.from(new Set(photos.map((p) => String(p.section || '').trim()).filter((s) => s && !GENERIC_SEC.test(s))));
   let badge = '';
-  if (sections.length >= 2) badge = `${sections.length}곳`;
-  else {
+  if (sections.length >= 2) {
+    const f = firstFeature(firstSectionTexts(photos));
+    const short = f ? f.replace(/수$/, '') : '';
+    badge = short && noSpace(`${short} ${sections.length}곳`).length <= 6 ? `${short} ${sections.length}곳` : `${sections.length}곳`;
+  } else {
     const f = firstFeature(firstSectionTexts(photos));
     if (f && noSpace(f).length <= 6) badge = f;
   }
@@ -487,8 +729,7 @@ export function repairPlan(plan, fallbackPlan, cutCount = 0) {
         badge = fb.badge || '';
       }
     }
-    const chk = checkCaption(subtitle);
-    const bad = subtitle && (chk.label || chk.evalWord || /(\d+\s*만?\s*원)/.test(subtitle) && (subtitle.match(/\d+\s*만?\s*원/g) || []).length >= 2);
+    const bad = subtitle && isWeakCaption(subtitle);
     if (bad && fbSeg.subtitle) {
       notes.push(`컷 ${i + 1} "${subtitle}" → "${fbSeg.subtitle}"`);
       subtitle = fbSeg.subtitle;
@@ -512,11 +753,22 @@ export function repairPlan(plan, fallbackPlan, cutCount = 0) {
 export function describeLines(lines = []) {
   const list = (lines || []).filter((s) => String(s || '').trim());
   const conn = list.filter((s) => checkCaption(s).connective).length;
-  const bad = list.map((s, i) => ({ i: i + 1, s, ...checkCaption(s) })).filter((x) => x.label || x.evalWord);
+  const seo = list.filter((s) => endingClass(s) === 'seo').length;
+  // 라벨 경고는 가격·숫자 나열만 문제로 봅니다(짧은 명사구 자막은 v11에서 허용).
+  const bad = list.map((s, i) => ({ i: i + 1, s, ...checkCaption(s) }))
+    .filter((x) => x.evalWord || isPriceLine(x.s));
+  const seq = list.map(endingClass);
+  const repeats = [];
+  for (let i = 1; i < seq.length; i++) {
+    if (seq[i] && seq[i] === seq[i - 1]) repeats.push(`컷${i}·컷${i + 1} 같은 말끝(${seq[i]})`);
+  }
   return {
     count: list.length,
     connective: conn,
-    bad: bad.map((b) => `컷${b.i} "${b.s}"${b.label ? ' 라벨' : ''}${b.evalWord ? ' 평가어' : ''}`),
+    seo,
+    repeats,
+    endings: seq,
+    bad: bad.map((b) => `컷${b.i} "${b.s}"${b.evalWord ? ' 평가어' : ''}${isPriceLine(b.s) ? ' 가격' : ''}`),
   };
 }
 
@@ -524,6 +776,7 @@ export function describeLines(lines = []) {
 if (typeof window !== 'undefined') {
   window.__reelsCopy = {
     buildPhotoPlan, buildHookBeats, candidatesFromContext, pickPointLine, clauseSplit,
-    toConnective, fitLine13, lossLine, ctaLine, repairPlan, cutContextBlock, describeLines, LIMIT: CAPTION_LIMIT,
+    toSpoken, endingClass, placeNames, stripNameSubject, placeFromSection, pickPlaceIntro, pickFollowLine,
+    fitLine13, lossLine, ctaLine, repairPlan, cutContextBlock, describeLines, LIMIT: LINE_LIMIT,
   };
 }
